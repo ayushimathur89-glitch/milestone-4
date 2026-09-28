@@ -1,0 +1,29 @@
+# Secrets — never commit
+.env
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Generated during ingestion; regenerate with ingest/run_ingestion.py
+# Pattern is data/raw/* (not data/raw/) so the .gitkeep can be re-included:
+# git cannot re-include a file whose parent directory is excluded.
+data/raw/*
+!data/raw/.gitkeep
+
+# NOTE: data/chroma/ is deliberately NOT ignored.
+# Render's free tier has an ephemeral filesystem, so the persisted vector
+# store must be committed for the app to start without re-ingesting.
+# See Docs/architecture.md section 4.
+
+# Local tool state
+.streamlit/secrets.toml
+.DS_Store
+Thumbs.db

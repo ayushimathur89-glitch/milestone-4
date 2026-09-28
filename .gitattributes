@@ -1,0 +1,10 @@
+# Normalize line endings so the repo behaves the same on Windows and on
+# Render's Linux build agents.
+* text=auto eol=lf
+
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.csv text eol=lf
+.gitattributes text eol=lf
+.gitignore text eol=lf

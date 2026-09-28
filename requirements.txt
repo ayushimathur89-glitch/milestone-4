@@ -1,0 +1,23 @@
+# Milestone 4 - Mutual Fund FAQs RAG Chatbot
+# Direct dependencies only; transitive deps are left to pip to resolve.
+# Verified against Python 3.14.7 on 2026-09-28.
+#
+# After a successful install, freeze the full resolved set for reproducible
+# Render builds:   pip freeze > requirements.lock.txt
+
+# --- Core RAG pipeline ---
+chromadb==1.5.9
+sentence-transformers==6.1.0
+
+# --- LLM (API key supplied via .env) ---
+groq==1.7.0
+
+# --- Source ingestion (official public pages only) ---
+requests==2.34.2
+beautifulsoup4==4.15.0
+
+# --- Config / secrets ---
+python-dotenv==1.2.3
+
+# --- UI ---
+streamlit==1.64.0

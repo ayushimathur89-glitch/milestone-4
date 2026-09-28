@@ -1,0 +1,6 @@
+url,scheme,doc_type,notes
+http://www.sbimf.com/campaign/flexicap-fund,SBI Flexicap Fund,campaign page,Start of corpus. Verify expense ratio / exit load present; add factsheet or SID URL if not.
+http://www.sbimf.com/campaign/large-cap-fund,SBI Large Cap Fund,campaign page,Start of corpus. Verify exit load slabs present.
+http://www.sbimf.com/campaign/elss,SBI ELSS Tax Saver Fund,campaign page,Start of corpus. Verify 3-year lock-in stated.
+http://www.sbimf.com/campaign/small-cap-fund,SBI Small Cap Fund,campaign page,Start of corpus. Verify minimum SIP stated.
+http://www.sbimf.com/campaign/balanced-advantage-fund,SBI Balanced Advantage Fund,campaign page,Start of corpus. Verify benchmark and riskometer present.
