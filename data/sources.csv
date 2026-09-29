@@ -1,6 +1,14 @@
 url,scheme,doc_type,notes
-http://www.sbimf.com/campaign/flexicap-fund,SBI Flexicap Fund,campaign page,Start of corpus. Verify expense ratio / exit load present; add factsheet or SID URL if not.
-http://www.sbimf.com/campaign/large-cap-fund,SBI Large Cap Fund,campaign page,Start of corpus. Verify exit load slabs present.
-http://www.sbimf.com/campaign/elss,SBI ELSS Tax Saver Fund,campaign page,Start of corpus. Verify 3-year lock-in stated.
-http://www.sbimf.com/campaign/small-cap-fund,SBI Small Cap Fund,campaign page,Start of corpus. Verify minimum SIP stated.
-http://www.sbimf.com/campaign/balanced-advantage-fund,SBI Balanced Advantage Fund,campaign page,Start of corpus. Verify benchmark and riskometer present.
+http://www.sbimf.com/campaign/flexicap-fund,SBI Flexicap Fund,campaign page,Prose: objective, scheme type, key highlights. VERIFIED LIVE. Contains none of the numeric facts.
+http://www.sbimf.com/campaign/elss,SBI ELSS Tax Saver Fund,campaign page,Prose: objective, scheme type, key highlights. VERIFIED LIVE. Contains none of the numeric facts.
+https://www.sbimf.com/docs/default-source/scheme-factsheets/sbi-flexicap-fund-factsheet-march-2026.pdf,SBI Flexicap Fund,factsheet,Report as on 31/03/2026. Only official source for minimum SIP amount.
+https://www.sbimf.com/docs/default-source/scheme-factsheets/sbi-large-cap-fund-factsheet-june-2025.pdf,SBI Large Cap Fund,factsheet,Report as on 30/06/2025. Latest factsheet published for this scheme.
+https://www.sbimf.com/docs/default-source/scheme-factsheets/sbi-elss-tax-saver-fund-factsheet-march-2026.pdf,SBI ELSS Tax Saver Fund,factsheet,Report as on 31/03/2026. States the 3-year lock-in.
+https://www.sbimf.com/docs/default-source/scheme-factsheets/sbi-small-cap-fund-factsheet-march-2026.pdf,SBI Small Cap Fund,factsheet,Report as on 31/03/2026. Only official source for minimum SIP amount.
+https://www.sbimf.com/docs/default-source/scheme-factsheets/sbi-balanced-advantage-fund-factsheet-march-2026.pdf,SBI Balanced Advantage Fund,factsheet,Report as on 31/03/2026. Only official source for minimum SIP amount.
+https://www.sbimf.com/docs/default-source/sif-forms/sid---sbi-flexicap-fund.pdf,SBI Flexicap Fund,SID,Dated October 2025. Source for riskometer, exit load slabs, capital gains, expense detail.
+https://www.sbimf.com/docs/default-source/sif-forms/sid---sbi-large-cap-fund-(formerly-known-as-bluechip-fund).pdf,SBI Large Cap Fund,SID,Dated October 2025. Source for riskometer, exit load slabs, capital gains, expense detail.
+https://www.sbimf.com/docs/default-source/sif-forms/sid---sbi-elss-tax-saver-fund.pdf,SBI ELSS Tax Saver Fund,SID,Dated October 2025. Source for riskometer, 3-year lock-in, exit load slabs, capital gains.
+https://www.sbimf.com/docs/default-source/sif-forms/sid---sbi-small-cap-fund.pdf,SBI Small Cap Fund,SID,Dated October 2025. Source for riskometer, exit load slabs, capital gains, expense detail.
+https://www.sbimf.com/docs/default-source/sif-forms/sid---sbi-balanced-advantage-fund.pdf,SBI Balanced Advantage Fund,SID,Dated October 2025. Source for riskometer, exit load slabs, capital gains, expense detail.
+https://www.sbimf.com/docs/default-source/expense-ratio/base-ter-change-w-e-f-20-03-2026.pdf,All schemes,TER notice,Base expense ratio percentages w.e.f. 20/03/2026. Covers the 4 equity schemes; balanced advantage is a hybrid and is not in this notice. Scheme is multi-valued so Phase 5 retrieval must treat this document as global rather than scheme-filtered.

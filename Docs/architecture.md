@@ -79,7 +79,7 @@ Answer in UI
 ### 2.3 Chunking strategy (proposed, to be validated against the loaded text)
 
 - **Why:** the corpus is FAQ/factsheet prose plus small fact tables (expense ratio slabs, exit-load slabs, minimum SIP, lock-in). Questions are short and fact-seeking, so small, self-contained chunks retrieve more precisely than large overlapping windows, and a missed chunk wastes less context.
-- **Size:** `max_chunk_words = 160`, `overlap_words = 30`. Chosen to stay inside the embedding model's 256-token window (≈ 160 words ≈ 200 tokens) so nothing is silently truncated at embed time.
+- **Size:** `max_chunk_words = 160`, `overlap_words = 30`, **and** a hard `MAX_EMBED_TOKENS = 256` ceiling. The word limit alone is not sufficient: the original estimate of "≈160 words ≈ 200 tokens" holds for ordinary prose but not for the SID tables, where 160 words of NAV codes and dates measured **470 tokens** (500 of 2,689 chunks). Word and token limits also conflict, since 160 single-token words can exceed 256 tokens while 256 tokens of prose can exceed 160 words, so `chunker._enforce_limits` alternates between them until both hold.
 - **Split order:** section heading → paragraph → sentence. Split on natural boundaries first; fall back to sentence-level packing only when a paragraph exceeds the limit.
 - **Tables:** keep the header row attached to its rows; an exit-load slab or expense-ratio line stays as one atomic chunk so it is never cited without its column meaning.
 - **Metadata per chunk:** `chunk_id`, `scheme`, `doc_type` (factsheet / KIM / SID / FAQ / fees / riskometer / statement guide), `source_url`, `page_title`, `section`, `fetched_at`.

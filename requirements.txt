@@ -15,6 +15,9 @@ groq==1.7.0
 # --- Source ingestion (official public pages only) ---
 requests==2.34.2
 beautifulsoup4==4.15.0
+# Factsheets are the only official source for TER, exit load, benchmark and
+# riskometer; SBI MF publishes them as PDF, so a PDF text layer is required.
+pypdf==6.4.0
 
 # --- Config / secrets ---
 python-dotenv==1.2.3
