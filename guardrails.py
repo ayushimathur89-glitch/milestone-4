@@ -312,9 +312,24 @@ def count_urls(text: str) -> int:
 
 @dataclass(frozen=True)
 class VerifyResult:
+    """Outcome of the post-check.
+
+    `problems` and `repairs` are separate because a repair that succeeded is
+    not a failure, and conflating them makes a working pipeline look broken.
+    A missing citation, for example, is *expected* on every answer: the
+    generator prompt tells the model not to emit a URL, so the app adds one.
+    Reporting that as a problem each time would train a reader to ignore the
+    field, which is exactly when a real violation would go unnoticed.
+    """
+
     ok: bool
     answer: str
     problems: tuple[str, ...] = ()
+    repairs: tuple[str, ...] = ()
+    # The link actually shown to the user, which is not always the cited
+    # chunk's own URL: a question whose answer *is* a link adopts the official
+    # URL from the context instead, so the answer keeps exactly one link.
+    citation: str = ""
 
 
 # Advice phrasing in a *generated answer*. The pre-check catches "should I buy",
@@ -335,7 +350,51 @@ def find_advice(text: str) -> str | None:
     return match.group(0) if match else None
 
 
-def verify_answer(answer: str, source_url: str, fetched_at: str) -> VerifyResult:
+# The exact wording the generator prompt instructs the model to use when the
+# context does not answer the question. Detecting it is what lets the pipeline
+# report "the model declined" instead of counting a refusal as a delivered
+# answer, which is the difference between 10/10 and 7/10 on the PRD list.
+DECLINE_SENTENCE = "That information is not in the official sources I have."
+
+_DECLINE = re.compile(
+    r"(?i)\b(?:that\s+information\s+is\s+not\s+in|"
+    r"the\s+(?:provided|retrieved|given)\s+(?:sources?|context|documents?)\s+"
+    r"(?:do(?:es)?\s+not|don'?t)\s+contain|"
+    r"not\s+(?:available|mentioned|stated|specified|provided|found)\s+in\s+"
+    r"(?:the\s+)?(?:provided\s+|retrieved\s+|source\s+)?"
+    r"(?:sources?|context|documents?)|"
+    r"do(?:es)?\s+not\s+contain\s+(?:that|this|the\s+answer)|"
+    r"i\s+(?:do\s+not|don'?t)\s+have\s+(?:that|this|the)\s+information|"
+    r"cannot\s+answer\s+from\s+the\s+(?:provided\s+)?(?:sources?|context))"
+)
+
+
+def is_decline(text: str) -> bool:
+    """Whether the generated answer is a refusal rather than a response.
+
+    Kept separate from `verify_answer` because a decline is *contract
+    compliant*: it has no invented facts, needs no repair, and passes every
+    check. The only thing wrong with it is that it does not answer, which is
+    a retrieval problem, not a guardrail one. Folding it into the same flag
+    would make the two indistinguishable when reading the results.
+    """
+    body = (text or "").split(config.LAST_UPDATED_PREFIX)[0]
+    return bool(_DECLINE.search(body))
+
+
+def context_urls(context: str) -> frozenset:
+    """Every URL that appears in the supplied source context.
+
+    Used to decide whether a URL the model wrote is a real citation or an
+    invention. A model is perfectly capable of producing a plausible
+    sbimf.com path that is in no document, and an unverified link is worse
+    than no link, so provenance is checked rather than assumed.
+    """
+    return frozenset(url.rstrip(".,;)") for url in _URL_RE.findall(context or ""))
+
+
+def verify_answer(answer: str, source_url: str, fetched_at: str,
+                  context: str = "") -> VerifyResult:
     """Check an LLM answer against the PRD contract, repairing what is safe.
 
     The rules, from PRD section on success criteria:
@@ -350,10 +409,11 @@ def verify_answer(answer: str, source_url: str, fetched_at: str) -> VerifyResult
     showing none.
     """
     problems: list[str] = []
+    repairs: list[str] = []
     body = (answer or "").strip()
 
     if _INVENTED_DATE_RE.search(body):
-        problems.append("model invented its own 'last updated' line")
+        repairs.append("dropped a self-invented date line")
         # Drop the whole sentence, not just the date phrase. Stripping only
         # "Last updated on 12 January 2024" from "Last updated on 12 January
         # 2024. The expense ratio is 2.25%." leaves the mangled orphan "is
@@ -369,20 +429,22 @@ def verify_answer(answer: str, source_url: str, fetched_at: str) -> VerifyResult
     # removed sentence does not also count as a truncation.
     advice = find_advice(body)
     if advice:
-        problems.append(f"answer contained advice ({advice!r})")
+        repairs.append(f"removed advice ({advice!r})")
         kept = [s for s in split_sentences(body) if not find_advice(s)]
         if kept:
             body = " ".join(kept).strip()
         else:
             # Every sentence was advice, so there is no factual answer left to
             # repair. Showing the safe message is the only honest option.
-            return VerifyResult(False, MSG_NO_CONTEXT,
-                                tuple(problems + ["no factual sentence remained"]))
+            problems.append("answer was entirely advice, no factual content")
+            return VerifyResult(False, MSG_NO_CONTEXT, tuple(problems),
+                                tuple(repairs))
 
     sentences = count_sentences(body)
     if sentences > config.MAX_ANSWER_SENTENCES:
-        problems.append(
-            f"{sentences} sentences exceeds the {config.MAX_ANSWER_SENTENCES} cap"
+        repairs.append(
+            f"truncated {sentences} sentences to the "
+            f"{config.MAX_ANSWER_SENTENCES}-sentence cap"
         )
         kept = split_sentences(body)
         if len(kept) > config.MAX_ANSWER_SENTENCES:
@@ -394,23 +456,53 @@ def verify_answer(answer: str, source_url: str, fetched_at: str) -> VerifyResult
             trimmed = re.sub(r"[^.!?]*$", "", body).strip()
             if trimmed:
                 body = trimmed
-        if source_url not in body:
-            body = f"{body} {source_url}".strip()
+    # A model-written URL is adopted as the citation only when it appears
+    # verbatim in the supplied context and sits on an allowed domain. This is
+    # what makes "where do I download the KIM/SID?" answerable: the URL *is*
+    # the answer, so the app adopts it instead of appending a second link and
+    # breaking the one-citation contract. An unrecognised or off-policy URL is
+    # an invention, so it is stripped and the chunk's own URL is used.
+    urls = _URL_RE.findall(body)
+    keep: list[str] = []
+    adopted = ""
+    if urls:
+        known = context_urls(context)
+        for url in urls:
+            clean = url.rstrip(".,;)")
+            if (
+                not adopted
+                and clean in known
+                and config.is_allowed_url(clean)
+            ):
+                adopted = clean
+                keep.append(clean)
+            else:
+                problems.append(
+                    f"dropped link not present in the source context: {clean}"
+                )
+                repairs.append("removed a model-written link")
+        body = _URL_RE.sub(" ", body)
+        body = " ".join(body.split()).strip()
+        if adopted:
+            repairs.append("used the official link the answer itself points to")
+            body = f"{body} {adopted}".strip()
 
-    urls = count_urls(body)
-    if urls == 0:
-        problems.append("no source link")
-        body = f"{body} {source_url}".strip() if body else source_url
-    elif urls > 1:
-        problems.append(f"{urls} source links, expected exactly one")
-        body = _URL_RE.sub("", body).strip()
-        body = f"{body} {source_url}".strip()
+    citation = adopted or source_url
+    if count_urls(body) == 0:
+        # Expected, not a defect: the prompt tells the model to omit the
+        # citation link and lets the app add it from cited-chunk metadata.
+        # Reporting this on every answer would drown out the real problems.
+        repairs.append("added the citation link from chunk metadata")
+        body = f"{body} {citation}".strip() if body else citation
 
     if not body.strip() or not count_sentences(body):
-        return VerifyResult(False, MSG_NO_CONTEXT, tuple(problems + ["empty answer"]))
+        problems.append("answer was empty after repair")
+        return VerifyResult(False, MSG_NO_CONTEXT, tuple(problems), tuple(repairs))
 
     final = f"{body}\n\n{config.LAST_UPDATED_PREFIX} {fetched_at}".strip()
-    return VerifyResult(True, final, tuple(problems))
+    return VerifyResult(
+        True, final, tuple(problems), tuple(repairs), citation=citation
+    )
 
 
 def no_context_answer() -> str:

@@ -61,6 +61,19 @@ CHUNK_OVERLAP_WORDS = 30
 TOP_K = 4
 MIN_SIMILARITY = 0.15
 
+# Candidates pulled from the vector store before reranking, and how much a
+# literal keyword match can promote a chunk. Both exist because dense
+# similarity alone ranks fact-bearing chunks out of the top 4: asking for the
+# "exit load" of SBI Large Cap Fund returned a returns table, cheque-payment
+# text and risk factors, while the chunk that actually states the load
+# structure sat at rank 2 for a near-duplicate question. Embeddings match
+# topic, not the exact term the user typed. Widening the candidate pool and
+# boosting chunks that literally contain the question's content words fixes
+# the recall; the floor above still runs on the dense score, because "is this
+# the right document at all" is a topical judgement.
+TOP_K_FETCH = 25
+LEXICAL_WEIGHT = 0.35
+
 # --- Answer contract ---
 MAX_ANSWER_SENTENCES = 3
 LAST_UPDATED_PREFIX = "Last updated from sources:"

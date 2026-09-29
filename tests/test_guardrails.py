@@ -131,9 +131,12 @@ def check_post_check() -> bool:
     print(f"  input ({guardrails.count_sentences(BAD_ANSWER)} sentences, "
           f"{guardrails.count_urls(BAD_ANSWER)} links):")
     print("  " + BAD_ANSWER.replace(". ", ".\n  "))
-    print(f"\n  caught {len(result.problems)} problem(s):")
+    print(f"\n  caught {len(result.problems)} problem(s), "
+          f"applied {len(result.repairs)} repair(s):")
     for problem in result.problems:
-        print(f"    - {problem}")
+        print(f"    ! {problem}")
+    for repair in result.repairs:
+        print(f"    ~ {repair}")
     print(f"\n  repaired answer:")
     print("  " + result.answer.replace("\n", "\n  "))
 
@@ -144,7 +147,7 @@ def check_post_check() -> bool:
     final_sentences = guardrails.count_sentences(body)
     final_urls = guardrails.count_urls(body)
     checks = [
-        (bool(result.problems), "at least one problem was caught"),
+        (bool(result.repairs), "at least one repair was applied"),
         (final_sentences <= config.MAX_ANSWER_SENTENCES,
          f"body is {final_sentences} sentences, cap is {config.MAX_ANSWER_SENTENCES}"),
         (final_urls == 1, f"body has exactly one link (has {final_urls})"),
@@ -152,6 +155,8 @@ def check_post_check() -> bool:
         ("2026-09-28" in result.answer, "last-updated date is the app-supplied one"),
         ("2024" not in body, "invented 2024 date removed from the body"),
         (guardrails.find_advice(body) is None, "advice sentence removed from the body"),
+        ("no source link" not in result.problems,
+         "a compliant answer with no model URL is not flagged as a problem"),
     ]
     ok = True
     print()
