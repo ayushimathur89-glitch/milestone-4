@@ -22,6 +22,7 @@ SAMPLES_DIR = PROJECT_ROOT / "samples"
 SOURCES_CSV = DATA_DIR / "sources.csv"
 INGEST_MANIFEST_CSV = DATA_DIR / "ingest_manifest.csv"
 CHUNKS_TXT = DATA_DIR / "chunks.txt"
+EMBEDDINGS_PREVIEW_TXT = DATA_DIR / "embeddings_preview.txt"
 
 # --- Secrets (never commit .env) ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")

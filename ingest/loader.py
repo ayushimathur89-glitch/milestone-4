@@ -53,6 +53,26 @@ _JUNK_LINE = re.compile(
     r"\+?\d[\d\s\-()]{7,}|www\.[\w.]+|copyright.*|©.*)$",
     re.I,
 )
+# Whole blocks that are page furniture rather than content. The campaign pages
+# hydrate parts of themselves with JavaScript, so a "Loading..." placeholder
+# and a lead-capture form survive every structural filter and would otherwise
+# be embedded and later retrieved as though they were facts about a fund.
+_PLACEHOLDER_BLOCK = re.compile(
+    r"^(loading\.{0,3}|please wait\.{0,3}|"
+    r"let'?s connect\b.*|fill in the (below )?form.*|"
+    r"get a call (back )?from (one of )?our experts?.*|"
+    r"submit|search|menu|close|open|next|previous|back to top|"
+    r"skip to (main )?content)\s*$",
+    re.I,
+)
+# Calls to action welded onto the end of real copy, e.g. a heading block
+# reading "... MIX OF INVESTMENTS Invest Now". Stripping the CTA keeps the
+# sentence instead of discarding the whole block with it.
+_TRAILING_CTA = re.compile(
+    r"\s+(invest now|apply now|view all|read more|click here|disclaimers?|"
+    r"know more( about (our|this|the)[^.]*)?)\s*$",
+    re.I,
+)
 
 
 @dataclass
@@ -184,8 +204,8 @@ def _blocks_from_soup(soup, predicate) -> list[str]:
     buffer: list[str] = []
 
     def flush() -> None:
-        text = " ".join(x for x in buffer if x).strip()
-        if text and not _JUNK_LINE.match(text):
+        text = _TRAILING_CTA.sub("", " ".join(x for x in buffer if x).strip()).strip()
+        if text and not _JUNK_LINE.match(text) and not _PLACEHOLDER_BLOCK.match(text):
             blocks.append(text)
         buffer.clear()
 

@@ -1,6 +1,6 @@
 """Ingestion entry point.
 
-Phase 2 runs the load and chunk stages only; embed and store are Phase 3.
+Runs the full pipeline: load, chunk, embed, store.
 
     .venv\\Scripts\\python -m ingest.run_ingestion
     .venv\\Scripts\\python -m ingest.run_ingestion --limit 2
@@ -9,10 +9,11 @@ Phase 2 runs the load and chunk stages only; embed and store are Phase 3.
 from __future__ import annotations
 
 import argparse
+import time
 from collections import Counter
 
 import config
-from ingest import chunker, loader
+from ingest import chunker, embedder, loader, store
 
 DEMO_FACTS = {
     "expense ratio": ["expense ratio", "total expense ratio", "recurring expense",
@@ -38,6 +39,58 @@ def report_facts(chunks: list[chunker.Chunk]) -> dict[str, list[str]]:
         hits = [c.chunk_id for c, low in haystack if any(n in low for n in needles)]
         found[fact] = hits
     return found
+
+
+def sanity_check(collection, chunks, vectors) -> bool:
+    """implementation.md Phase 3 step 3: shapes are 384-dim and ranking works.
+
+    A store full of 384-dim vectors proves only that shapes line up. What
+    actually matters is that a question about a real topic retrieves its own
+    kind of chunk, and ranks it above an unrelated question's result. Cosine
+    similarity is the right measure because `embedder` normalises, so the
+    dot product is the cosine.
+    """
+    sample = vectors[0]
+    print(f"  chunk vector shape  : {tuple(sample.shape)}")
+    if tuple(sample.shape) != (config.EMBEDDING_DIM,):
+        print(f"  Expected ({config.EMBEDDING_DIM},); vectors are the wrong width.")
+        return False
+
+    relevant = "What is the exit load on the SBI Flexicap Fund?"
+    unrelated = "How do I bake sourdough bread at high altitude?"
+    q_relevant = embedder.embed_query(relevant)
+    q_unrelated = embedder.embed_query(unrelated)
+    print(f"  question vector shape: {tuple(q_relevant.shape)}")
+    if tuple(q_relevant.shape) != (config.EMBEDDING_DIM,):
+        return False
+
+    def top(question: str) -> str:
+        result = collection.query(
+            query_embeddings=[embedder.embed_query(question).tolist()],
+            n_results=1,
+            include=["documents", "distances"],
+        )
+        return result["documents"][0][0], result["distances"][0][0]
+
+    best_doc, best_distance = top(relevant)
+    worst_doc, worst_distance = top(unrelated)
+    # Cosine space: distance == 1 - cosine similarity.
+    best_sim = 1 - best_distance
+    worst_sim = 1 - worst_distance
+    print(f"  top hit for a real question  : cos {best_sim:+.3f} (dist {best_distance:.3f})")
+    print(f"     {best_doc[:96]}")
+    print(f"  top hit for an unrelated one  : cos {worst_sim:+.3f} (dist {worst_distance:.3f})")
+    print(f"     {worst_doc[:96]}")
+    if best_sim <= worst_sim:
+        print("  A finance question did not outrank an unrelated one; ranking is broken.")
+        return False
+    if best_sim < config.MIN_SIMILARITY:
+        print(f"  Best cosine {best_sim:.3f} is below config.MIN_SIMILARITY "
+              f"{config.MIN_SIMILARITY}; Phase 5 would reject every chunk.")
+        return False
+
+    print(f"  ranking ok, and above config.MIN_SIMILARITY ({config.MIN_SIMILARITY})")
+    return True
 
 
 def main() -> int:
@@ -106,8 +159,57 @@ def main() -> int:
         print(f"\n  MISSING: {', '.join(missing)}")
         print("  Add an official factsheet/SID URL to data/sources.csv and re-run.")
         return 1
-
     print("\nAll demo facts present.")
+
+    print()
+    print("=" * 72)
+    print("STAGE 3  EMBED")
+    print("=" * 72)
+    started = time.perf_counter()
+    vectors = embedder.embed_texts([c.text for c in chunks], show_progress=False)
+    elapsed = time.perf_counter() - started
+    dim = embedder.embed_dim()
+    print(f"  model       : {config.EMBEDDING_MODEL}")
+    print(f"  loaded      : {dim}-dim" if dim == config.EMBEDDING_DIM
+          else f"  loaded      : {dim}-dim (config says {config.EMBEDDING_DIM}!)")
+    print(f"  vectors     : {len(vectors):,} x {dim} in {elapsed:.1f}s"
+          f"  ({len(vectors) / max(elapsed, 1e-9):.1f} chunks/s, CPU)")
+    if dim != config.EMBEDDING_DIM:
+        print("  Dimension mismatch with config.EMBEDDING_DIM; fix before trusting retrieval.")
+        return 1
+    if len(vectors) != len(chunks):
+        print(f"  Vector count {len(vectors)} != chunk count {len(chunks)}.")
+        return 1
+
+    preview = embedder.render_preview(vectors, chunks)
+    config.EMBEDDINGS_PREVIEW_TXT.write_text(preview, encoding="utf-8")
+    print(f"  preview     -> {config.EMBEDDINGS_PREVIEW_TXT}")
+
+    print()
+    print("=" * 72)
+    print("STAGE 4  STORE")
+    print("=" * 72)
+    store.reset_store()
+    client = store.get_client()
+    collection = store.replace_collection(client)
+    stored = store.store_chunks(collection, chunks, vectors)
+    size = store.collection_size(collection)
+    print(f"  collection  : {config.COLLECTION_NAME}  (cosine space)")
+    print(f"  vectors     : {stored:,} written")
+    print(f"  count()     : {size:,}")
+    print(f"  persisted   -> {config.CHROMA_DIR}"
+          f"  ({store.disk_usage() / 1_048_576:.1f} MiB on disk)")
+    if size != len(chunks):
+        print(f"  Count {size:,} != chunk count {len(chunks):,}; store is inconsistent.")
+        return 1
+
+    print()
+    print("=" * 72)
+    print("STAGE 4 CHECK  embedding sanity")
+    print("=" * 72)
+    if not sanity_check(collection, chunks, vectors):
+        return 1
+
     return 0 if not problems else 1
 
 
