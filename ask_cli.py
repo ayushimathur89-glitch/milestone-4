@@ -71,7 +71,7 @@ def run_one(question: str, collection, show_context: bool,
         print(f"   {answer.rewrite_notes}")
     print(THIN)
     if answer.scheme_filter:
-        print(f"  scheme filter : {answer.scheme_filter}")
+        print(f"  scheme filter : {answer.scheme_label}")
     else:
         print("  scheme filter : (none detected)")
     if answer.hits:
@@ -223,8 +223,8 @@ def main() -> int:
                 print("  forgotten; the next question has no context")
             continue
         if lowered == "/filter":
-            scheme = retrieval.detect_scheme(question)
-            print(f"  detected scheme: {scheme or 'none'}")
+            schemes = retrieval.detect_schemes(question)
+            print(f"  detected scheme(s): {', '.join(schemes) if schemes else 'none'}")
             continue
 
         try:

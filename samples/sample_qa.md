@@ -123,6 +123,51 @@ Confirmed by `tests.test_guardrails` and section 3 of `tests.test_pipeline`:
 The corpus has no live NAV feed and no projections, and neither question
 produced a number.
 
+## Investigated: "What is the minimum SIP for SBI Flexicap Fund and SBI Small Cap Fund?"
+
+**Before.** The bot answered "That information is not in the official sources I
+have" and cited the Flexicap SID. The corpus states both schemes' minimum SIP.
+It was a wrong answer wearing a decline's clothes, and it carried a citation, so
+nothing on screen signalled that the check had never happened.
+
+**Two separate causes, and the second was only visible after fixing the first.**
+
+1. **`detect_scheme` returned only the first match.** "SBI Flexicap Fund and SBI
+   Small Cap Fund" matched Flexicap, the search was filtered to Flexicap, and
+   Small Cap's chunks were unreachable. One scheme's context cannot answer a
+   question about two, so the model declined. `detect_schemes` now returns every
+   scheme named and the filter becomes a disjunction, with
+   `config.GLOBAL_SCHEME` added exactly once - a repeated `{"$or": [...]}` is a
+   different query to Chroma, not a no-op.
+2. **One shared fetch window starved the second scheme.** This did not show up
+   until cause 1 was fixed. `TOP_K_FETCH` is a fixed 60 chunks, so a scheme with
+   more text about the topic takes the whole window. Small Cap's load-structure
+   chunk was present in a Small Cap-only pool and **absent** from the combined
+   one, so a combined filter fixed the exit-load question for one scheme and
+   still left the other blank. A question naming several schemes is now queried
+   **once per scheme** and the results merged, de-duplicated by `chunk_id` so
+   the shared global notice cannot occupy two slots.
+
+A third thing was tried and rejected: reserving a fixed number of slots per
+scheme. Both schemes were already in the top 6, so nothing was reserved and the
+chunk actually stating the figure still missed. The problem was never that a
+scheme was absent, it is that six chunks cannot hold two schemes' figures. Each
+queried scheme now guarantees its single best chunk a place, and the rest ranks
+normally. One-scheme and unfiltered questions are unchanged - still exactly
+`TOP_K`, asserted in the tests.
+
+After the fix, live:
+
+| Question | Filter | Answered |
+|---|---|---|
+| minimum SIP, Flexicap + Small Cap | both | both figures, no decline |
+| exit load, Flexicap + Small Cap | both | 0.10% / Nil and 1% within a year / Nil |
+| benchmark, ELSS + Large Cap | both | BSE 500 TRI and BSE 100 TRI |
+| minimum SIP across three schemes | all three | all three figures |
+
+The global TER notice never takes a guaranteed slot, since it states no
+scheme's rate and would displace the figures actually asked for.
+
 ## Follow-up questions (conversation memory)
 
 The REPL keeps the last 10 messages and uses them to rewrite a follow-up into a
@@ -273,7 +318,13 @@ went from 2,685 to 2,690 chunks.
 
 ## Fixed during this pass
 
-1. **Off-topic routing for named competitions and general knowledge.** "Who won
+1. **A question naming two schemes could only search one of them.** See the
+   section above: the bot declined a two-scheme question the corpus answers,
+   while citing a link. Two causes - a single-match `detect_scheme`, and a single
+   shared fetch window that starved the second scheme - plus one rejected
+   approach (per-scheme slot reservation) recorded because the negative result
+   is the useful part. Pinned in section 6 of `tests/test_memory.py`.
+2. **Off-topic routing for named competitions and general knowledge.** "Who won
    the FIFA World Cup in 2022?" carries no sport word, so the vocabulary that
    caught "IPL" let it through to retrieval, where the best unrelated chunk
    scored 0.163 and the model was asked a football question out of
@@ -282,7 +333,7 @@ went from 2,685 to 2,690 chunks.
    knowledge with no topic word ("what is the capital of France", "what time
    does the Mumbai train leave"). Ten cases are pinned in
    `tests/test_guardrails.py`; classification is 42/42.
-2. **`MIN_SIMILARITY` recalibrated from 0.15 to 0.40, by measurement.** At 0.15
+3. **`MIN_SIMILARITY` recalibrated from 0.15 to 0.40, by measurement.** At 0.15
    the floor sat *below* every off-topic question tested, so it separated
    nothing. Over 20 answerable and 20 off-topic questions the lowest answerable
    scores 0.539 ("What is the benchmark index for SBI ELSS?") and the highest
@@ -291,7 +342,7 @@ went from 2,685 to 2,690 chunks.
    the classifier is the primary gate and the floor is only a backstop. At 0.40
    there is 0.139 of headroom below the weakest real question and 0.191 above
    the worst off-topic one.
-3. **Question 6 is no longer reported as a retrieval bug.** The declined-question
+4. **Question 6 is no longer reported as a retrieval bug.** The declined-question
    check counted any corpus chunk containing the probe phrase, and six ELSS
    chunks contain "capital gains" - all tax treatment, none a procedure. It
    called a source gap "our bug". The test now distinguishes the two, verifies

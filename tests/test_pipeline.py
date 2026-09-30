@@ -321,7 +321,7 @@ def check_retrieval_quality(answers) -> None:
     _rule("6. RETRIEVAL QUALITY: top-k logged (spec step 5, read these)")
     for answer in answers:
         print(f"\n  Q: {answer.question}")
-        print(f"     filter: {answer.scheme_filter or 'none'}  "
+        print(f"     filter: {answer.scheme_label}  "
               f"best: {max((h.similarity for h in answer.hits), default=0):+.3f}")
         for i, hit in enumerate(answer.above_floor[:3], start=1):
             print(f"     [{i}] {hit.similarity:+.3f} {hit.chunk_id} "

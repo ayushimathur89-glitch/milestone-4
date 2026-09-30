@@ -261,6 +261,86 @@ def check_buffer() -> bool:
     return not failures
 
 
+def check_multi_scheme() -> bool:
+    """A question naming two schemes must be able to answer both.
+
+    This is the live check for a bug that produced a plausible-looking wrong
+    answer: `detect_scheme` returned only the first match, so a two-scheme
+    question was filtered to one scheme and the bot declined a question the
+    corpus answers, citing a link as though it had checked.
+    """
+    print()
+    print(BAR)
+    print("6. MULTI-SCHEME QUESTIONS (live retrieval, no LLM)")
+    print(BAR)
+    failures = []
+
+    def expect(label: str, ok: bool, detail: str = "") -> None:
+        if not ok:
+            failures.append(label)
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}{('  ' + detail) if detail else ''}")
+
+    expect("detect_schemes returns every scheme named",
+           retrieval.detect_schemes(
+               "minimum SIP for SBI Flexicap Fund and SBI Small Cap Fund?")
+           == (FLEXICAP, SMALLCAP))
+    expect("a single scheme still returns one",
+           retrieval.detect_schemes("exit load of SBI Flexicap Fund?")
+           == (FLEXICAP,))
+    expect("no scheme still returns none",
+           retrieval.detect_schemes("what is the NAV today?") == ())
+    expect("detect_scheme still gives the first for single-value callers",
+           retrieval.detect_scheme(
+               "minimum SIP for SBI Flexicap Fund and SBI Small Cap Fund?")
+           == FLEXICAP)
+
+    two = retrieval.scheme_filter((FLEXICAP, SMALLCAP))
+    expect("the global document appears exactly once in a two-scheme filter",
+           [b["scheme"] for b in two["$or"]].count(config.GLOBAL_SCHEME) == 1,
+           str(two))
+    expect("scheme_filter returns None for no schemes",
+           retrieval.scheme_filter(()) is None
+           and retrieval.scheme_filter(None) is None)
+
+    # The live measurement: does each scheme's answer reach the context?
+    for label, question, expect_ids in (
+        ("exit load", "What is the exit load of SBI Flexicap Fund and "
+         "SBI Small Cap Fund?", ("sbi-flexicap-fund-0093",
+                                 "sbi-small-cap-fund-1657")),
+        ("minimum SIP", "What is the minimum SIP amount for SBI Flexicap Fund "
+         "and SBI Small Cap Fund?", ("sbi-flexicap-fund-0310",
+                                     "sbi-small-cap-fund-1864")),
+    ):
+        result = retrieval.retrieve(question, top_k=40)
+        ids = {h.chunk_id for h in result.hits}
+        got = [c for c in expect_ids if c in ids]
+        expect(f"both schemes' {label} chunks are retrievable",
+               len(got) == 2, f"found {len(got)}/2")
+
+    # And the top-k that the model actually sees must span both schemes.
+    for question in (
+        "What is the exit load of SBI Flexicap Fund and SBI Small Cap Fund?",
+        "What is the benchmark of SBI ELSS Tax Saver Fund and SBI Large Cap Fund?",
+    ):
+        result = retrieval.retrieve(question)
+        schemes = {h.scheme for h in result.hits}
+        named = set(retrieval.detect_schemes(question))
+        expect(f"the context spans every scheme asked about: {question[:52]}...",
+               named <= schemes,
+               f"asked {sorted(named)}, context had {sorted(schemes)}")
+
+    # A one-scheme question must be untouched: no extra slots, no behaviour change.
+    single = retrieval.retrieve("What is the exit load of SBI Flexicap Fund?")
+    expect("a single-scheme question still returns exactly TOP_K",
+           len(single.hits) == config.TOP_K, f"got {len(single.hits)}")
+    unfiltered = retrieval.retrieve("What is the NAV today?")
+    expect("an unfiltered question still returns exactly TOP_K",
+           len(unfiltered.hits) == config.TOP_K, f"got {len(unfiltered.hits)}")
+
+    print(f"\n  {'all multi-scheme checks passed' if not failures else f'{len(failures)} FAILED'}")
+    return not failures
+
+
 def check_filter_engages() -> bool:
     """The point of the feature: the rewrite must engage the scheme filter.
 
@@ -286,16 +366,16 @@ def check_filter_engages() -> bool:
         bare = retrieval.retrieve(follow_up)
         scoped = retrieval.retrieve(resolved)
 
-        ok = detected == FLEXICAP and bool(bare.scheme_filter is None) \
-            and bool(scoped.scheme_filter == FLEXICAP)
+        ok = detected == FLEXICAP and bare.scheme_filter == () \
+            and scoped.scheme_filter == (FLEXICAP,)
         if not ok:
             failures.append(follow_up)
         mark = "ok  " if ok else "FAIL"
         print(f"  {mark} {follow_up!r}")
-        print(f"         as typed : filter={bare.scheme_filter or 'none'}, "
+        print(f"         as typed : filter={bare.scheme_label}, "
               f"{len(bare.above_floor())} chunk(s) above floor, "
               f"best {bare.best_similarity:+.3f}")
-        print(f"         rewritten: filter={scoped.scheme_filter or 'none'}, "
+        print(f"         rewritten: filter={scoped.scheme_label}, "
               f"{len(scoped.above_floor())} chunk(s) above floor, "
               f"best {scoped.best_similarity:+.3f}")
 
@@ -316,6 +396,7 @@ def main() -> int:
         "pass-through": check_passthrough(),
         "routing unchanged": check_routing_unchanged(),
         "the buffer": check_buffer(),
+        "multi-scheme": check_multi_scheme(),
         "filter engages": check_filter_engages(),
     }
     print()

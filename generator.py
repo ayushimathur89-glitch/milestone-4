@@ -134,7 +134,10 @@ class Answer:
     source_url: str = ""
     fetched_at: str = ""
     chunk_id: str = ""
-    scheme_filter: str | None = None
+    # Every scheme the search was scoped to. A tuple because a question can name
+    # two, and scoping to only the first is what made a two-scheme question
+    # unanswerable; `scheme_label` is the display form.
+    scheme_filter: tuple[str, ...] = ()
     hits: tuple = field(default_factory=tuple)
     above_floor: tuple = field(default_factory=tuple)
     problems: tuple[str, ...] = ()
@@ -163,6 +166,15 @@ class Answer:
         answered when the model said it had nothing to go on.
         """
         return self.used_llm and not self.refused and not self.declined
+
+    @property
+    def scheme_label(self) -> str:
+        """The retrieval scope as a person reads it, for the CLI and reports."""
+        if not self.scheme_filter:
+            return "none"
+        if len(self.scheme_filter) == 1:
+            return self.scheme_filter[0]
+        return " + ".join(self.scheme_filter)
 
 
 def ask(question: str, show_context: bool = False, collection=None,

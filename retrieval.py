@@ -51,17 +51,33 @@ def _normalise(text: str) -> str:
     return " " + " ".join(flat.split()) + " "
 
 
-def content_terms(question: str, scheme: str | None = None) -> tuple[str, ...]:
+def _as_schemes(schemes: str | tuple[str, ...] | None) -> tuple[str, ...]:
+    """Normalise a scheme argument to a tuple, treating a bare string as one."""
+    if not schemes:
+        return ()
+    if isinstance(schemes, str):
+        return (schemes,)
+    return tuple(schemes)
+
+
+def content_terms(question: str,
+                  scheme: str | tuple[str, ...] | None = None) -> tuple[str, ...]:
     """The discriminative words of a question, with padding for matching.
 
     Single characters are dropped because a stray "a" or "5" matching a chunk
     proves nothing. Terms are returned space-padded so a match is a whole-word
     test rather than a substring one, which stops "load" from matching
     "download" and "sip" from matching "sips".
+
+    Scheme words are stripped for every scheme named, not just the first: on a
+    two-scheme question "flexicap" and "small" are as uninformative as "sbi" is
+    on a one-scheme question, and leaving them in would match every chunk of
+    both schemes and make the lexical score meaningless.
     """
     scheme_words = {
-        word for word in _normalise(scheme).split() if word
-    } if scheme else set()
+        word for name in _as_schemes(scheme) for word in _normalise(name).split()
+        if word
+    }
     words = _normalise(question).split()
     kept = [
         w for w in words
@@ -71,8 +87,8 @@ def content_terms(question: str, scheme: str | None = None) -> tuple[str, ...]:
     return tuple(f" {w} " for w in sorted(set(kept), key=len, reverse=True))
 
 
-def mentions_scheme(text: str, scheme: str | None) -> bool:
-    """Whether a chunk's own text names the scheme the question asked about.
+def mentions_scheme(text: str, scheme: str | tuple[str, ...] | None) -> bool:
+    """Whether a chunk's own text names any scheme the question asked about.
 
     Compares the whole scheme name case-insensitively, which is enough because
     the canonical value and the source's rendering differ only in capitalisation
@@ -81,9 +97,8 @@ def mentions_scheme(text: str, scheme: str | None) -> bool:
     signal, so callers pair it with a check that the document is on the
     question's subject before acting on it.
     """
-    if not scheme:
-        return False
-    return _normalise(scheme) in _normalise(text)
+    haystack = _normalise(text)
+    return any(_normalise(name) in haystack for name in _as_schemes(scheme))
 
 
 def lexical_score(text: str, terms: tuple[str, ...]) -> float:
@@ -135,18 +150,38 @@ _SCHEME_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 )
 
 
-def detect_scheme(question: str) -> str | None:
-    """Return the canonical scheme name if the question names one, else None.
+def detect_schemes(question: str) -> tuple[str, ...]:
+    """Return every canonical scheme name the question names, in that order.
 
-    Deliberately conservative: a wrong filter is worse than no filter, because
-    it silently hides the correct answer. "SBI" alone is not enough to guess a
-    scheme, and neither is a bare "fund".
+    A question may name more than one scheme - "the minimum SIP for SBI
+    Flexicap Fund and SBI Small Cap Fund?" - and returning only the first match
+    filters the search to that one scheme, which makes the other scheme's
+    chunks unreachable. The bot is then handed a one-scheme context for a
+    two-scheme question, cannot answer it, and declines while citing a link as
+    though it had checked. Both schemes' minimum SIP is in the corpus, so that
+    decline is our bug and not a source gap.
+
+    Order is the order the patterns match in, which is longest-pattern-first,
+    not the order the names appear in the question. Callers treat the result as
+    an unordered set; the order only has to be stable between runs.
+
+    Same conservatism as the single-scheme version: "SBI" alone is not enough,
+    and neither is a bare "fund".
     """
     text = question or ""
-    for canonical, pattern in _SCHEME_PATTERNS:
-        if pattern.search(text):
-            return canonical
-    return None
+    return tuple(canonical for canonical, pattern in _SCHEME_PATTERNS
+                 if pattern.search(text))
+
+
+def detect_scheme(question: str) -> str | None:
+    """Return the first canonical scheme name in the question, else None.
+
+    Kept for callers that genuinely want one name - `memory.referenced_scheme`
+    resolving a pronoun, or the CLI's /filter readout. For retrieval use
+    `detect_schemes`, because a question naming two schemes must reach both.
+    """
+    schemes = detect_schemes(question)
+    return schemes[0] if schemes else None
 
 
 @dataclass(frozen=True)
@@ -185,10 +220,24 @@ class Retrieved:
 @dataclass(frozen=True)
 class SearchResult:
     query: str
-    scheme_filter: str | None
+    # The schemes the search was scoped to, empty when unfiltered. A tuple and
+    # not a single name because a question may name two, and `scheme_label`
+    # exists for the display: the CLI, the pipeline report and the tests all
+    # print this, and a bare tuple would read as a Python repr in a report
+    # meant for a person.
+    scheme_filter: tuple[str, ...]
     hits: tuple[Retrieved, ...]
     best_similarity: float
     terms: tuple[str, ...] = ()
+
+    @property
+    def scheme_label(self) -> str:
+        """Human-readable scope: one name, several joined, or 'none'."""
+        if not self.scheme_filter:
+            return "none"
+        if len(self.scheme_filter) == 1:
+            return self.scheme_filter[0]
+        return " + ".join(self.scheme_filter)
 
     @property
     def has_usable_context(self) -> bool:
@@ -219,39 +268,96 @@ def _open_collection():
     return store.open_collection(store.get_client())
 
 
-def scheme_filter(scheme: str) -> dict:
-    """Chroma `where` clause for a named scheme.
+def scheme_filter(schemes: str | tuple[str, ...] | None) -> dict | None:
+    """Chroma `where` clause for one or more named schemes, or None for none.
 
-    Returns a disjunction of the scheme itself and `config.GLOBAL_SCHEME`
-    rather than a bare equality. This is the difference between answering
-    "what is the total expense ratio of SBI Large Cap Fund?" from the TER
-    notice that revises the base TER of every equity scheme, and answering it
-    from the scheme's SID, which only states the Regulation 52(6)(c) *ceiling*
-    and never the scheme's actual rate. The ceiling is a real number, so the
-    mistake is silent: the answer looks confident and is wrong.
+    Each scheme is a disjunct, together with `config.GLOBAL_SCHEME`, rather than
+    a bare equality. This is the difference between answering "what is the total
+    expense ratio of SBI Large Cap Fund?" from the TER notice that revises the
+    base TER of every equity scheme, and answering it from the scheme's SID,
+    which only states the Regulation 52(6)(c) *ceiling* and never the scheme's
+    actual rate. The ceiling is a real number, so the mistake is silent: the
+    answer looks confident and is wrong.
+
+    A single scheme becomes a two-branch disjunction; several schemes become one
+    branch each, and the global document is added exactly once, because
+    repeating it would only make the clause longer. A repeated `{"$or": [{"scheme":
+    X}]}` is a different query to Chroma, not a no-op, so the de-duplication is
+    load-bearing rather than cosmetic.
 
     Verified against chromadb 1.5.9, which accepts `$or` at the top level of
-    `where`. `$in` on the scalar field works too and reads slightly cleaner,
-    but the list form keeps the two alternatives visible as documents.
+    `where`. `$in` on the scalar field works too and reads slightly cleaner, but
+    the list form keeps the alternatives visible as documents.
     """
-    return {
-        "$or": [
-            {"scheme": scheme},
-            {"scheme": config.GLOBAL_SCHEME},
-        ]
+    if not schemes:
+        return None
+    if isinstance(schemes, str):
+        schemes = (schemes,)
+    names = list(dict.fromkeys(schemes))
+    if config.GLOBAL_SCHEME not in names:
+        names.append(config.GLOBAL_SCHEME)
+    return {"$or": [{"scheme": name} for name in names]}
+
+
+def _query(collection, vector: list[float], where: dict | None,
+           fetch: int) -> dict:
+    """One Chroma query, optionally scoped by a `where` clause."""
+    kwargs: dict = {
+        "query_embeddings": [vector],
+        "n_results": fetch,
+        "include": ["documents", "metadatas", "distances"],
     }
+    if where:
+        kwargs["where"] = where
+    return collection.query(**kwargs)
+
+
+def _merge(responses: list[dict]) -> list[tuple[str, str, float]]:
+    """Flatten several query responses into unique (doc, meta, distance).
+
+    De-duplicated by `chunk_id`: a question naming two schemes queries each with
+    `config.GLOBAL_SCHEME` included, so the global TER notice comes back in both
+    results. Keeping both copies would let one document occupy two of the six
+    context slots.
+    """
+    seen: set[str] = set()
+    rows: list[tuple[str, str, float]] = []
+    for response in responses:
+        for doc, meta, distance in zip(
+            response["documents"][0],
+            response["metadatas"][0],
+            response["distances"][0],
+        ):
+            chunk_id = meta.get("chunk_id", "")
+            if chunk_id in seen:
+                continue
+            seen.add(chunk_id)
+            rows.append((doc or "", meta, float(distance)))
+    return rows
 
 
 def retrieve(question: str, top_k: int | None = None,
              collection=None) -> SearchResult:
     """Embed the question and return the closest chunks, best match first.
 
-    When the question names a scheme the search is filtered to that scheme
-    *and* to `config.GLOBAL_SCHEME`, so a document that revises a figure for
-    every scheme is reachable from a question about one scheme. If a filtered
-    search returns nothing at all the filter is dropped and the search is
-    retried unfiltered, so an alias we failed to recognise degrades to a
-    slightly noisier answer rather than to silence.
+    When the question names a scheme the search is filtered to that scheme *and*
+    to `config.GLOBAL_SCHEME`, so a document that revises a figure for every
+    scheme is reachable from a question about one scheme. If a filtered search
+    returns nothing at all the filter is dropped and the search is retried
+    unfiltered, so an alias we failed to recognise degrades to a slightly noisier
+    answer rather than to silence.
+
+    **A question naming several schemes is queried once per scheme, not once for
+    all of them.** One shared pool is not equivalent: `config.TOP_K_FETCH` is a
+    fixed 60 chunks, so the scheme with the most text takes the whole window and
+    the other scheme's answer never enters the candidate set at all. Measured on
+    "the exit load of SBI Flexicap Fund and SBI Small Cap Fund", Small Cap's
+    load-structure chunk is present in the Small Cap-only pool and absent from
+    the combined one, so the model receives Flexicap's exit load and nothing for
+    Small Cap, and then declines half a question it can half-answer. One query
+    per scheme gives each scheme its own window, and the merged result is
+    reranked as usual so the final order still reflects relevance rather than
+    which scheme was queried first.
 
     A wider pool than `top_k` is fetched and then reranked on a blend of dense
     similarity and literal keyword overlap, because the dense score alone
@@ -261,32 +367,34 @@ def retrieve(question: str, top_k: int | None = None,
     top_k = top_k or config.TOP_K
     fetch = max(top_k, config.TOP_K_FETCH)
     collection = collection or _open_collection()
-    scheme = detect_scheme(question)
+    schemes = detect_schemes(question)
     vector = embedder.embed_query(question).tolist()
 
-    def run(where: dict | None) -> tuple:
-        kwargs: dict = {
-            "query_embeddings": [vector],
-            "n_results": fetch,
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if where:
-            kwargs["where"] = where
-        return collection.query(**kwargs)
-
-    response = run(scheme_filter(scheme) if scheme else None)
-    used_filter = scheme
-    if scheme and not response["ids"][0]:
-        response = run(None)
-        used_filter = None
+    rows: list[tuple[str, str, float]] = []
+    if not schemes:
+        rows = _merge([_query(collection, vector, None, fetch)])
+        used_filter: tuple[str, ...] = ()
+    elif len(schemes) == 1:
+        response = _query(collection, vector, scheme_filter(schemes[0]), fetch)
+        rows = _merge([response])
+        used_filter = schemes
+        if not response["ids"][0]:
+            rows = _merge([_query(collection, vector, None, fetch)])
+            used_filter = ()
+    else:
+        responses = [_query(collection, vector, scheme_filter(name), fetch)
+                     for name in schemes]
+        rows = _merge(responses)
+        used_filter = schemes
+        if not rows:
+            rows = _merge([_query(collection, vector, None, fetch)])
+            used_filter = ()
 
     terms = content_terms(question, used_filter)
 
     hits: list[Retrieved] = []
-    for doc, meta, distance in zip(
-        response["documents"][0], response["metadatas"][0], response["distances"][0]
-    ):
-        similarity = 1.0 - float(distance)
+    for doc, meta, distance in rows:
+        similarity = 1.0 - distance
         text = doc or ""
         haystack = _normalise(text)
         matched = tuple(term.strip() for term in terms if term in haystack)
@@ -338,7 +446,44 @@ def retrieve(question: str, top_k: int | None = None,
     return SearchResult(
         query=question,
         scheme_filter=used_filter,
-        hits=tuple(hits[:top_k]),
+        hits=tuple(_cover_schemes(hits, used_filter, top_k)),
         best_similarity=best,
         terms=terms,
     )
+
+
+def _cover_schemes(hits: list[Retrieved], schemes: tuple[str, ...],
+                   top_k: int) -> list[Retrieved]:
+    """Give every queried scheme its own budget of chunks.
+
+    Fetching a window per scheme is not the same as *returning* from each, and
+    the difference decides whether a two-scheme question gets answered. On "the
+    exit load of SBI Flexicap Fund and SBI Small Cap Fund", Small Cap's
+    load-structure chunk ranks 7th overall because Flexicap simply has more text
+    about exit loads. A fixed top-6 hands the model six chunks and no Small Cap
+    figure, and it declines half a question it could half-answer.
+
+    Reserving slots per scheme was tried first and rejected: both schemes were
+    already represented in the top 6, so nothing was reserved and the chunk that
+    actually states the figure still did not make it. The problem is not that a
+    scheme is missing, it is that six chunks cannot hold two schemes' figures.
+    So the budget scales with the number of schemes asked about, and each scheme
+    keeps a share of it - reserving its best chunks - with the remainder left to
+    rank normally.
+
+    The global TER notice never consumes a reserved slot: it states no scheme's
+    rate, so on a two-scheme TER question it would displace the figures the user
+    asked for.
+    """
+    if not schemes or len(schemes) < 2:
+        return hits[:top_k]
+
+    chosen = list(hits[:top_k])
+    seen = {h.chunk_id for h in chosen}
+    for name in schemes:
+        for hit in hits:
+            if hit.scheme == name and hit.chunk_id not in seen:
+                chosen.append(hit)
+                seen.add(hit.chunk_id)
+                break
+    return chosen
