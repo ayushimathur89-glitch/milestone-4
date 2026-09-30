@@ -207,8 +207,12 @@ Deliberate limits, all covered by tests:
   scheme name, so "should I buy it?" becomes "should I buy SBI Flexicap Fund?"
   and is still refused as advisory. Pinned for advisory, performance and PII.
 - A turn containing PII is never stored, so a later turn cannot quote it back.
-  `tests.test_memory` assembles those literals at runtime to keep the Phase 4
-  PII scanner's allow-list at exactly one file.
+  `tests.test_memory` and `tests/test_ui.py` assemble those literals at runtime
+  to keep the Phase 4 PII scanner's allow-list at exactly one file.
+- Clear chat resets the buffer as well as the transcript. Clearing only the
+  transcript would leave the bot resolving "its" against a conversation the
+  user can no longer see, which is the more confusing of the two failures.
+  Pinned in section 5 of `tests/test_ui.py`.
 - `/history` shows the buffer, `/reset` forgets it, `--no-memory` turns the
   feature off. The buffer is in-memory only and is dropped when the process
   exits.
@@ -285,7 +289,7 @@ went from 2,685 to 2,690 chunks.
    invented; it cannot prove the live sbimf.com page still says the same
    thing. `data/ingest_manifest.csv` carries each `fetched_at` date for that
    reason, and every answer carries it on screen.
-5. **No document in the corpus states a scheme's total expense ratio.** The SID
+4. **No document in the corpus states a scheme's total expense ratio.** The SID
    gives only the regulatory ceiling (2.25% / 1.50% slabs), which is a limit
    and not the scheme's own figure, and the factsheet does not state it. The
    base-TER notice does give per-scheme figures - SBI Large Cap Fund direct
@@ -296,7 +300,7 @@ went from 2,685 to 2,690 chunks.
    bot declines. The same applies to question 1, which is why it defers to
    `sbimf.com/total-expense-ratio` rather than quoting 2.25%. A dedicated
    official TER page per scheme in `data/sources.csv` would close this.
-6. **`"Can I redeem SBI Large Cap Fund units after 90 days?"` is routed to
+5. **`"Can I redeem SBI Large Cap Fund units after 90 days?"` is routed to
    advisory instead of factual.** It is a question about whether a load
    applies, and the corpus answers it, but "can I ... redeem" matches the
    advisory vocabulary, so the bot refuses a question it can answer. The
@@ -305,7 +309,7 @@ went from 2,685 to 2,690 chunks.
    patterns rather than a retrieval problem. Left open deliberately: advisory
    vocabulary is a blunt instrument and narrowing it needs the same kind of
    measurement as gap 4, not a guess.
-7. **Some follow-ups are not resolved, and are searched as typed.** The rewriter
+6. **Some follow-ups are not resolved, and are searched as typed.** The rewriter
    covers possessives, pronouns, "there", demonstratives and bare topic
    fragments, but not ellipsis with a dropped verb ("and the risk?", "fees?" is
    covered, "versus Large Cap?" is not) and not anaphora that spans two turns
@@ -315,6 +319,43 @@ went from 2,685 to 2,690 chunks.
    filter the answer out of existence, and the two errors are not comparable in
    cost. Closing this properly means an LLM rewrite, which is a cost and safety
    decision rather than a bug fix, so it is not done here.
+
+## The interface (Phase 6)
+
+`app.py` is a thin client over the same `generator.ask` the CLI calls, so there
+is no second answer path to keep in sync. The questions above are what the
+pipeline produces; what follows is what the user sees around them.
+
+| Requirement | Behaviour |
+|---|---|
+| Message history | Every turn stays on screen; each answer keeps its own Sources panel |
+| Sources expander | `Sources (6 used of 6 retrieved)` under each answer, one block per chunk with scheme, document type, section, chunk id, fetch date, matched terms and a 600-character preview |
+| Clear chat | Empties the transcript *and* the memory buffer |
+| Example questions | The three from PRD section 5, as buttons, each of which asks its own question |
+| Facts-only notice | `config.DISCLAIMER` in the sidebar, and again under the title |
+| Scope boundary | The five schemes are listed in the sidebar next to it |
+
+**"Sources (6 used of 6 retrieved)" is the floor, and the label says so.** The
+model sees only chunks at or above `config.MIN_SIMILARITY`; the sub-threshold
+ones are still listed, marked `below floor`, so a near miss is visible instead
+of being invisible. An empty retrieval renders no panel at all rather than an
+empty one, because a pre-check refusal returns before retrieval and "0 used of
+0 retrieved" would imply the sources were consulted and came up short.
+
+**A refused PII message is redacted, not just refused.** Echoing the question
+back would put the PAN straight back on screen, which satisfies neither the
+requirement nor the person who typed it; the transcript shows
+`[pan removed - that kind of personal detail is not stored]` instead. The
+distinction between "the post-check changed this answer" and "this was not
+answered" is carried in the panel label rather than assumed, because those are
+different events and a panel claiming a post-check repair where none happened
+would be simply untrue.
+
+Verification is `tests/test_ui.py`, which runs the real script through
+Streamlit's `AppTest` harness with the model stubbed - no tokens, and no
+dependency on a rate limit. The PII checks run *without* the stub on purpose:
+if the pre-check ever stopped short of the model, a real rate-limit error would
+surface as a failure rather than passing quietly. All six sections pass.
 
 ## Fixed during this pass
 
@@ -342,7 +383,15 @@ went from 2,685 to 2,690 chunks.
    the classifier is the primary gate and the floor is only a backstop. At 0.40
    there is 0.139 of headroom below the weakest real question and 0.191 above
    the worst off-topic one.
-4. **Question 6 is no longer reported as a retrieval bug.** The declined-question
+4. **The citation appeared twice on screen.** `verify_answer` appends the source
+   URL to the answer text, and Streamlit's markdown autolinks a bare URL, so
+   printing `answer.answer` and then adding a `[url](url)` below it put the same
+   source on screen twice - reading as two sources for one claim, which is
+   exactly the impression the one-citation contract exists to prevent. The app
+   now lifts the citation out of the body and re-attaches it once as an
+   explicit link. Nothing is reworded, and `tests/test_ui.py` asserts the answer
+   carries exactly one link with no bare URL left beside it.
+5. **Question 6 is no longer reported as a retrieval bug.** The declined-question
    check counted any corpus chunk containing the probe phrase, and six ELSS
    chunks contain "capital gains" - all tax treatment, none a procedure. It
    called a source gap "our bug". The test now distinguishes the two, verifies
