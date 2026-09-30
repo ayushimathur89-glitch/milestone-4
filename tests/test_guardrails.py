@@ -43,6 +43,23 @@ CASES: list[tuple[str, str]] = [
     ("Can you bake sourdough bread at high altitude?", "off_topic"),
     ("Who won the IPL match yesterday?", "off_topic"),
     ("What is the price of gold today?", "off_topic"),
+    # Named competitions carry no sport word, so the vocabulary that caught
+    # "IPL" let "Who won the FIFA World Cup in 2022?" through to retrieval,
+    # where the best unrelated chunk still cleared the similarity floor.
+    ("Who won the FIFA World Cup in 2022?", "off_topic"),
+    ("Who won the NBA finals last year?", "off_topic"),
+    ("Who won the Champions League?", "off_topic"),
+    ("What is the score in the Ashes test?", "off_topic"),
+    ("Who won the election in Maharashtra?", "off_topic"),
+    # General-knowledge shapes with no topic word to match on. These measured
+    # high enough to matter: 0.469 and 0.460 against 0.539 for the weakest
+    # answerable fund question, so a similarity floor alone could not separate
+    # them from real questions.
+    ("What is the capital of France?", "off_topic"),
+    ("What time does the Mumbai train leave?", "off_topic"),
+    ("What is the next train to Pune?", "off_topic"),
+    ("How tall is the Eiffel Tower?", "off_topic"),
+    ("Who is the president of France?", "off_topic"),
 ]
 
 # The spec's own test table, reproduced verbatim. kept separately because the

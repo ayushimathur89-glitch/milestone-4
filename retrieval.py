@@ -71,6 +71,21 @@ def content_terms(question: str, scheme: str | None = None) -> tuple[str, ...]:
     return tuple(f" {w} " for w in sorted(set(kept), key=len, reverse=True))
 
 
+def mentions_scheme(text: str, scheme: str | None) -> bool:
+    """Whether a chunk's own text names the scheme the question asked about.
+
+    Compares the whole scheme name case-insensitively, which is enough because
+    the canonical value and the source's rendering differ only in capitalisation
+    and spacing: the TER notice writes "sbi large cap fund direct" where the
+    canonical value is "SBI Large Cap Fund". A scheme name alone is a weak
+    signal, so callers pair it with a check that the document is on the
+    question's subject before acting on it.
+    """
+    if not scheme:
+        return False
+    return _normalise(scheme) in _normalise(text)
+
+
 def lexical_score(text: str, terms: tuple[str, ...]) -> float:
     """Fraction of the question's content words present in one chunk.
 
@@ -152,6 +167,7 @@ class Retrieved:
     # the chunk is about the right subject; `score` is the ranking key.
     score: float = 0.0
     matched_terms: tuple[str, ...] = ()
+    names_scheme: bool = False
 
     @property
     def allowed_url(self) -> bool:
@@ -203,14 +219,39 @@ def _open_collection():
     return store.open_collection(store.get_client())
 
 
+def scheme_filter(scheme: str) -> dict:
+    """Chroma `where` clause for a named scheme.
+
+    Returns a disjunction of the scheme itself and `config.GLOBAL_SCHEME`
+    rather than a bare equality. This is the difference between answering
+    "what is the total expense ratio of SBI Large Cap Fund?" from the TER
+    notice that revises the base TER of every equity scheme, and answering it
+    from the scheme's SID, which only states the Regulation 52(6)(c) *ceiling*
+    and never the scheme's actual rate. The ceiling is a real number, so the
+    mistake is silent: the answer looks confident and is wrong.
+
+    Verified against chromadb 1.5.9, which accepts `$or` at the top level of
+    `where`. `$in` on the scalar field works too and reads slightly cleaner,
+    but the list form keeps the two alternatives visible as documents.
+    """
+    return {
+        "$or": [
+            {"scheme": scheme},
+            {"scheme": config.GLOBAL_SCHEME},
+        ]
+    }
+
+
 def retrieve(question: str, top_k: int | None = None,
              collection=None) -> SearchResult:
     """Embed the question and return the closest chunks, best match first.
 
-    When the question names a scheme the search is filtered to that scheme.
-    If a filtered search returns nothing at all the filter is dropped and the
-    search is retried unfiltered, so an alias we failed to recognise degrades
-    to a slightly noisier answer rather than to silence.
+    When the question names a scheme the search is filtered to that scheme
+    *and* to `config.GLOBAL_SCHEME`, so a document that revises a figure for
+    every scheme is reachable from a question about one scheme. If a filtered
+    search returns nothing at all the filter is dropped and the search is
+    retried unfiltered, so an alias we failed to recognise degrades to a
+    slightly noisier answer rather than to silence.
 
     A wider pool than `top_k` is fetched and then reranked on a blend of dense
     similarity and literal keyword overlap, because the dense score alone
@@ -233,7 +274,7 @@ def retrieve(question: str, top_k: int | None = None,
             kwargs["where"] = where
         return collection.query(**kwargs)
 
-    response = run({"scheme": scheme} if scheme else None)
+    response = run(scheme_filter(scheme) if scheme else None)
     used_filter = scheme
     if scheme and not response["ids"][0]:
         response = run(None)
@@ -249,6 +290,32 @@ def retrieve(question: str, top_k: int | None = None,
         text = doc or ""
         haystack = _normalise(text)
         matched = tuple(term.strip() for term in terms if term in haystack)
+        names_scheme = mentions_scheme(text, used_filter)
+        score = similarity + config.LEXICAL_WEIGHT * lexical_score(text, terms)
+        # A row in a global document that names the queried scheme is keyed to
+        # that scheme: the scheme name is the only column distinguishing it from
+        # the other schemes listed beside it. A scheme-scoped chunk is merely
+        # about the scheme and says nothing about being the answer to this
+        # question, so the credit is reserved for the global row. Without it a
+        # row like "SBI Large Cap Fund Direct 0.65 0.66 20.03.2026" loses to
+        # notice prose that merely repeats the question's words, because the
+        # row's own header abbreviates them ("Base TER") and matches no term.
+        #
+        # Naming the scheme is necessary but not sufficient: every scheme the
+        # notice lists is named in some row, so on its own this promoted a
+        # base-TER row to first place for an exit-load question and the answer
+        # then cited the TER notice instead of the SID. The document must also
+        # be on the question's subject, judged by its own URL and title, so the
+        # credit is spent only where the question and the document agree.
+        on_subject = any(
+            term.strip() and term in _normalise(
+                f"{meta.get('source_url', '')} {meta.get('page_title', '')}"
+            )
+            for term in terms
+        )
+        if (names_scheme and on_subject
+                and meta.get("scheme", "") == config.GLOBAL_SCHEME):
+            score += config.GLOBAL_ROW_BONUS
         hits.append(Retrieved(
             chunk_id=meta.get("chunk_id", ""),
             scheme=meta.get("scheme", ""),
@@ -259,8 +326,9 @@ def retrieve(question: str, top_k: int | None = None,
             fetched_at=meta.get("fetched_at", ""),
             text=text,
             similarity=similarity,
-            score=similarity + config.LEXICAL_WEIGHT * lexical_score(text, terms),
+            score=score,
             matched_terms=matched,
+            names_scheme=names_scheme,
         ))
 
     # Sort on the blended score; dense similarity breaks ties so the ordering

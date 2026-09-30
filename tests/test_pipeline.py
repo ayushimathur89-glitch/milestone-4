@@ -70,6 +70,55 @@ PROBES = {
         ("SBI Balanced Advantage Fund", "riskometer"),
 }
 
+# Declines that are a gap in what SBI MF publishes, not a retrieval bug.
+#
+# The probe heuristic above cannot tell these apart on its own: it counts any
+# corpus chunk containing the probe phrase, and six ELSS chunks contain
+# "capital gains" - all of them tax treatment ("long-term gains above Rs. 1
+# lakh are taxed at 20%"), none of them a download procedure. Term presence is
+# not evidence that the corpus can answer the question, so the heuristic called
+# this a retrieval miss and blamed our recall for a fact nobody publishes.
+#
+# The claim is checked rather than trusted: see PROCEDURE_CUES below. If a
+# future corpus does state the procedure, the entry becomes a failure and says
+# so. Evidence for the gap is in samples/sample_qa.md.
+SOURCE_GAPS = {
+    "How do I download my capital-gains statement for SBI ELSS?":
+        "SBI MF publishes no public page with the procedure (12 candidate "
+        "paths 404, no account-statement page in the site nav)",
+}
+
+# Words that indicate a chunk actually tells the reader how to do something,
+# rather than merely mentioning the subject. Used to corroborate a source gap.
+PROCEDURE_CUES = (
+    "download", "how to", "where can i", "step ", "steps to", "procedure",
+    "log in", "login", "sign in", "register", "log into", "available at",
+)
+
+# Filled in by check_declined_questions, read by the summary.
+SOURCE_GAP_DECLINES: list[str] = []
+
+
+def _states_procedure(text: str, probe: str, window: int = 200) -> bool:
+    """Whether `text` says how to do something, near the probe phrase.
+
+    Proximity is the whole point. Requiring the cue anywhere in the chunk gave
+    a false corroboration: "capital gains" and the bare word "procedure" both
+    occur in one 150-word chunk about redemption mechanics, without the chunk
+    describing a statement download anywhere. A real procedure puts them side
+    by side - "download the capital gains statement" - so the cue has to be
+    near the probe to count.
+    """
+    flat = " ".join((text or "").lower().split())
+    probe = probe.lower()
+    start = flat.find(probe)
+    while start != -1:
+        span = flat[max(0, start - window): start + len(probe) + window]
+        if any(cue in span for cue in PROCEDURE_CUES):
+            return True
+        start = flat.find(probe, start + 1)
+    return False
+
 # Figures: a number with a percent, currency, or decimal, optionally with
 # surrounding units. Used to prove the answer copied rather than invented.
 _FIGURE = re.compile(
@@ -221,18 +270,33 @@ def check_declined_questions(answers, collection) -> bool:
     """
     _rule("7. DECLINED QUESTIONS: honest refusal, or a retrieval miss?")
     ok = True
+    SOURCE_GAP_DECLINES.clear()
     for answer in answers:
         if not answer.declined or answer.question not in PROBES:
             continue
         scheme, probe = PROBES[answer.question]
         got = collection.get(where={"scheme": scheme}, include=["documents"])
         docs = got.get("documents") or []
-        found = sum(1 for d in docs if probe.lower() in " ".join((d or "").lower().split()))
+        normalised = [" ".join((d or "").lower().split()) for d in docs]
+        found = sum(1 for d in normalised if probe.lower() in d)
         in_retrieved = any(
             probe.lower() in " ".join(h.text.lower().split())
             for h in answer.above_floor
         )
-        if found and not in_retrieved:
+        if answer.question in SOURCE_GAPS:
+            # Corroborate the documented gap instead of believing it.
+            corroborating = sum(
+                1 for d in docs if _states_procedure(d, probe)
+            )
+            if corroborating:
+                verdict = (f"documented gap CONTRADICTED: {corroborating} "
+                           f"chunk(s) do state a procedure")
+                good = False
+            else:
+                verdict = f"source gap, not a retrieval bug: {SOURCE_GAPS[answer.question]}"
+                good = True
+                SOURCE_GAP_DECLINES.append(answer.question)
+        elif found and not in_retrieved:
             verdict, good = "RETRIEVAL MISS (our bug)", False
         elif in_retrieved:
             verdict, good = "in context, model still declined (suspicious)", False
@@ -245,8 +309,11 @@ def check_declined_questions(answers, collection) -> bool:
     if not declined:
         print("  (no PRD question was declined; nothing to adjudicate)")
     else:
+        unexplained = len(declined) - len(SOURCE_GAP_DECLINES)
         print(f"\n  {len(declined)} of {len(PRD_QUESTIONS)} PRD questions "
-              f"still decline (spec wants all 10 answered)")
+              f"still decline (spec wants all 10 answered): "
+              f"{len(SOURCE_GAP_DECLINES)} documented source gap(s), "
+              f"{unexplained} unexplained")
     return ok
 
 
@@ -312,10 +379,16 @@ def main() -> int:
           f"{declined} declined, "
           f"{len(PRD_QUESTIONS) - answered - declined} routed away")
     if declined:
-        print("\n  Declined questions are a retrieval shortfall, not a "
-              "guardrail\n  success. Spec line 175 wants all 10 answered; a "
-              "decline here is\n  an open item, so treat a non-zero count as a "
-              "failing run.")
+        gaps = len(SOURCE_GAP_DECLINES)
+        unexplained = declined - gaps
+        print(f"\n  Spec line 175 wants all {len(PRD_QUESTIONS)} answered, so "
+              f"this run still fails.\n  But the declines are not all the "
+              f"same kind of problem:\n"
+              f"    {gaps} documented source gap(s) - SBI MF does not publish "
+              f"the fact.\n      Correcting behaviour needs a new official "
+              f"source, not code.\n"
+              f"    {unexplained} unexplained decline(s) - recall shortfall or "
+              f"suspicious context,\n      which is our bug and must be fixed.")
         return 1
     return 0 if all(results.values()) else 1
 

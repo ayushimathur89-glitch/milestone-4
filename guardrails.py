@@ -187,6 +187,27 @@ _OFF_TOPIC = (
     r"\b(?:joke|poem|song\s+lyrics|write\s+a\s+story)\b",
     r"\b(?:python|java\s+program|javascript|sql\s+query|debug\s+this\s+code)\b",
     r"\b(?:football|cricket|tennis|badminton|ipl)\b",
+    # Named competitions and bodies, not just the sports. "Who won the FIFA
+    # World Cup in 2022?" contains no sport word, so the line above missed it
+    # and the question was routed to retrieval, where the best unrelated chunk
+    # still cleared the similarity floor and the model was asked a football
+    # question out of mutual-fund documents.
+    r"\b(?:world\s?cup|fifa|uefa|olympic\w*|champions\s?league|"
+    r"premier\s?league|la\s?liga|serie\s?a\b|bundesliga|world\s?series|"
+    r"nba\b|nfl\b|formula\s?1\b|f1\b|ashes\b|ryder\s?cup)\b",
+    r"\bwho\s+won\b",
+    # General-knowledge shapes that a mutual-fund corpus will never answer but
+    # that carry no topic word to match on. These measured high enough to
+    # matter: "Who won the election in Maharashtra?" reaches 0.469 and "What
+    # time does the Mumbai train leave?" 0.460, against 0.539 for the *least*
+    # answerable fund question in the calibration set.
+    r"\b(?:timetable|train\s+time|flight\s+time|bus\s+time|next\s+train|"
+    r"next\s+flight|how\s+far\s+is|how\s+tall\s+is|how\s+much\s+does\s+\w+\s+weigh)\b",
+    r"\b(?:train|bus|flight|ship|ferry)\s+(?:leave|depart|arriv|reach|cancel)\w*",
+    r"\btime\s+does\s+the\s+\w+\s+(?:train|bus|flight)\b",
+    r"\bcapital\s+of\s+\w+",
+    r"\bwho\s+(?:is|was|are|were)\s+the\s+(?:president|prime\s+minister|"
+    r"ceo\s+of\s+\w+)\b",
     r"\b(?:homework|essay\s+on|exam\s+question)\b",
 )
 

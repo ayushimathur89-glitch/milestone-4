@@ -115,15 +115,81 @@ def _pack_sentences(sentences: list[str], max_words: int) -> list[str]:
     return groups
 
 
+def _looks_tabular(words: list[str]) -> bool:
+    """True when a single unpunctuated run reads as flattened table rows.
+
+    This is the token-level counterpart to `is_table_block`, which can only
+    judge a block once pypdf has left it at least two newline-separated rows.
+    A table that arrives as one line is invisible to that check, yet it is
+    recognisable on its own: a dense run of bare numbers punctuated by scheme
+    names, with none of the sentence punctuation ordinary prose carries. The
+    thresholds are deliberately strict so a paragraph of figures is not
+    mistaken for a table and given a repeated false header.
+    """
+    if len(words) < 12:
+        return False
+    numeric = sum(1 for token in words if _NUMERIC.match(token))
+    if numeric < 8 or numeric / len(words) < 0.15:
+        return False
+    # Prose always ends some words with sentence punctuation; a table's bare
+    # date and percentage tokens do not.
+    return not any(token.endswith((".", "!", "?")) and len(token) > 3
+                   and not _NUMERIC.match(token) for token in words)
+
+
+def _lead_words(words: list[str]) -> list[str]:
+    """The column names opening a flattened table run, or nothing for prose.
+
+    Shared by both window and token splitting, because either can be the path a
+    long table takes: `_window_split` when the word limit binds first,
+    `_token_split` when the 256-token ceiling binds first, which is what a dense
+    run of percentages and dates actually hits. Whichever splits it, only the
+    first piece would otherwise keep the header, leaving every later piece a
+    list of bare numbers that cannot be read or cited.
+    """
+    if not _looks_tabular(words):
+        return []
+    return words[: config.CHUNK_TABLE_LEAD_WORDS]
+
+
 def _window_split(text: str, max_words: int) -> list[str]:
     """Last-resort split on a hard word boundary.
 
     SID text is largely unpunctuated runs, so sentence boundaries often do not
     exist. Without this a single unit can exceed the limit and, because the
     embedding window is 256 tokens, be silently truncated in Phase 3.
+
+    When the run is a fact table flattened onto a single line, the leading
+    words are the column names and every later window repeats them. Without
+    that, a window is a list of bare numbers - "sbi focused fund direct 0.60
+    20.03.2026 sbi large cap fund direct 0.65 0.66 20.03.2026" - which says
+    nothing about which number is the existing TER, which is the revised one,
+    or that either is a percentage, so the row cannot be read or cited even
+    when it is retrieved. pypdf emits these tables as one long line, so
+    `is_table_block` never sees the rows that would let `_split_table` repeat
+    the header, and the loss happens here.
     """
     words = text.split()
-    return [" ".join(words[i : i + max_words]) for i in range(0, len(words), max_words)]
+    if len(words) <= max_words:
+        return [" ".join(words)]
+
+    lead: list[str] = _lead_words(words)
+    lead_len = len(lead)
+    body_size = max(max_words - lead_len, max_words // 2)
+
+    windows: list[str] = []
+    for start in range(0, len(words), body_size):
+        piece = words[start : start + body_size]
+        if start == 0 or not lead:
+            windows.append(" ".join(piece))
+            continue
+        # Never repeat a lead that is already inside this window, which keeps
+        # the short trailing window from carrying the header twice.
+        if piece[:lead_len] == lead:
+            windows.append(" ".join(piece))
+        else:
+            windows.append(" ".join([*lead, *piece]))
+    return windows
 
 
 def _split_table(block: str, max_words: int) -> list[str]:
@@ -191,14 +257,36 @@ def _token_count(text: str) -> int:
 def _token_split(text: str, max_tokens: int) -> list[str]:
     """Bisect on the real token boundary until every part fits."""
     tokenizer = _tokenizer()
-    ids = tokenizer.encode(text, add_special_tokens=False)
-    if len(ids) <= max_tokens:
+    offsets = tokenizer(
+        text, add_special_tokens=False, return_offsets_mapping=True
+    )["offset_mapping"]
+    if len(offsets) <= max_tokens:
         return [text]
-    middle = len(ids) // 2
-    left = tokenizer.decode(ids[:middle], skip_special_tokens=True).strip()
-    right = tokenizer.decode(ids[middle:], skip_special_tokens=True).strip()
+    middle = len(offsets) // 2
+
+    # Cut the original string, never the decoded tokens. Round-tripping through
+    # the vocabulary rewrites the text: WordPiece decode lowercases it and
+    # re-spaces punctuation, so "SBI" becomes "sbi" and "0.65" becomes
+    # "0. 65". That silently corrupted every figure in the corpus - expense
+    # ratios, exit loads, NAVs and dates - because a run of numbers tokenises
+    # heavily and is exactly what reaches this branch.
+    cut = offsets[middle][0]
+    head = text.rfind(" ", 0, cut)
+    if head > 0:
+        cut = head
+    tail = text.find(" ", offsets[middle][1])
+    start = tail if tail != -1 else offsets[middle][1]
+    left = text[:cut].strip()
+    right = text[start:].strip()
     if not left or not right:
         return [text]
+
+    # Re-seat the table header on the tail, as `_window_split` does, and only
+    # when that strictly shortens it, so the recursion always makes progress.
+    lead = _lead_words(text.split())
+    if lead and len(lead) < len(right.split()):
+        right = " ".join([*lead, *right.split()])
+
     return _token_split(left, max_tokens) + _token_split(right, max_tokens)
 
 
