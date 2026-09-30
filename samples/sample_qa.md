@@ -123,6 +123,51 @@ Confirmed by `tests.test_guardrails` and section 3 of `tests.test_pipeline`:
 The corpus has no live NAV feed and no projections, and neither question
 produced a number.
 
+## Follow-up questions (conversation memory)
+
+The REPL keeps the last 10 messages and uses them to rewrite a follow-up into a
+standalone question *before* retrieval. Without it, "what about its fees?" names
+no scheme, so the scheme filter never engages and the search degenerates to
+matching "fees" across all five schemes.
+
+| Turn | Question | Retrieval question | Filter |
+|---|---|---|---|
+| 1 | What is the exit load for SBI Flexicap Fund? | unchanged | SBI Flexicap Fund |
+| 2 | what about its fees? | What is the fees for SBI Flexicap Fund? | SBI Flexicap Fund |
+| 3 | lock-in period? | What is the lock-in period for SBI Flexicap Fund? | SBI Flexicap Fund |
+
+Measured, live retrieval, no LLM call:
+
+| Follow-up | As typed | Rewritten |
+|---|---|---|
+| what about its fees? | no filter, best +0.529 | filter on, best **+0.714** |
+| and its minimum SIP amount? | no filter, best +0.630 | filter on, best **+0.743** |
+| lock-in period? | no filter, 2 chunks, best +0.476 | filter on, 6 chunks, best **+0.686** |
+| is there a lock-in period? | no filter, 3 chunks, best +0.443 | filter on, 6 chunks, best **+0.712** |
+
+**The rewrite is a rule set, not a model call.** It decides which filter
+engages, and a wrong filter hides the correct answer silently, so it is written
+to be readable and testable rather than clever. `tests.test_memory` pins 12
+rewrites and 14 pass-throughs, and the live check confirms the filter engages.
+
+Deliberate limits, all covered by tests:
+
+- A question that already names a scheme is never rewritten.
+- A question naming another fund house ("Kotak Flexicap") is not treated as a
+  follow-up, so Flexicap is not silently substituted.
+- A follow-up that cannot be resolved is passed through unchanged, which is the
+  pre-existing behaviour. "what about it?" is left alone because resolving it
+  yields a scheme name with no question attached.
+- Memory cannot make a refused question answerable. Resolving only inserts a
+  scheme name, so "should I buy it?" becomes "should I buy SBI Flexicap Fund?"
+  and is still refused as advisory. Pinned for advisory, performance and PII.
+- A turn containing PII is never stored, so a later turn cannot quote it back.
+  `tests.test_memory` assembles those literals at runtime to keep the Phase 4
+  PII scanner's allow-list at exactly one file.
+- `/history` shows the buffer, `/reset` forgets it, `--no-memory` turns the
+  feature off. The buffer is in-memory only and is dropped when the process
+  exits.
+
 ## Investigated: "What is the total expense ratio of SBI Large Cap Fund?"
 
 **Before.** The bot answered with the SEBI regulatory ceiling - 2.25% on the
@@ -215,6 +260,16 @@ went from 2,685 to 2,690 chunks.
    patterns rather than a retrieval problem. Left open deliberately: advisory
    vocabulary is a blunt instrument and narrowing it needs the same kind of
    measurement as gap 4, not a guess.
+7. **Some follow-ups are not resolved, and are searched as typed.** The rewriter
+   covers possessives, pronouns, "there", demonstratives and bare topic
+   fragments, but not ellipsis with a dropped verb ("and the risk?", "fees?" is
+   covered, "versus Large Cap?" is not) and not anaphora that spans two turns
+   back rather than the most recent one. Anything unresolved passes through
+   unchanged, so the result is the pre-feature behaviour - an unfiltered search
+   on a few ambiguous words. That is the safer failure: a wrong rewrite would
+   filter the answer out of existence, and the two errors are not comparable in
+   cost. Closing this properly means an LLM rewrite, which is a cost and safety
+   decision rather than a bug fix, so it is not done here.
 
 ## Fixed during this pass
 

@@ -2,16 +2,22 @@
 
     .venv\\Scripts\\python ask_cli.py
     .venv\\Scripts\\python ask_cli.py --question "What is the exit load?"
-    .venv\\Scripts\\python ask_cli.py --no-context
+    .venv\\Scripts\\python ask_cli.py --no-memory
     .venv\\Scripts\\python ask_cli.py --show-hits 4
 
 Shows the retrieved chunks for every answer, the similarity score, whether the
 scheme filter engaged, and whether a Groq call happened at all, so a refusal
 can be confirmed as a refusal rather than inferred from its wording.
 
+Keeps the last 10 messages, so a follow-up such as "what about its fees?" is
+resolved to the scheme being discussed before retrieval. When that happens the
+resolved question is printed above the chunks, because the question that was
+actually searched is not the question that was typed.
+
 Commands: type a question and press enter. /chunks N changes how many chunks
 are printed. /all prints every retrieved chunk, not just those above the
-floor. /filter toggles the scheme filter. /quit exits.
+floor. /filter toggles the scheme filter. /history shows what is remembered.
+/reset forgets it. /quit exits.
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ import argparse
 
 import config
 import generator
+import memory
 import retrieval
 from ingest import store
 
@@ -50,11 +57,18 @@ def show_hits(answer: generator.Answer, limit: int, show_all: bool) -> None:
 
 
 def run_one(question: str, collection, show_context: bool,
-            hit_limit: int, show_all: bool) -> generator.Answer:
-    answer = generator.ask(question, collection=collection)
+            hit_limit: int, show_all: bool,
+            conversation: memory.Conversation | None = None) -> generator.Answer:
+    answer = generator.ask(question, collection=collection,
+                           conversation=conversation)
 
     print(BAR)
     print(f"Q: {question}")
+    if answer.resolved_question and answer.resolved_question != question:
+        # Printed because the filter and the ranking below were driven by this
+        # line, not by the question the user typed.
+        print(f"   (rewritten for retrieval: {answer.resolved_question})")
+        print(f"   {answer.rewrite_notes}")
     print(THIN)
     if answer.scheme_filter:
         print(f"  scheme filter : {answer.scheme_filter}")
@@ -103,6 +117,9 @@ def run_one(question: str, collection, show_context: bool,
 
     if answer.source_url:
         print(f"\n  citation : {answer.source_url}  (from {answer.chunk_id})")
+    if conversation is not None:
+        print(f"  memory   : {len(conversation)}/{conversation.limit} messages "
+              f"remembered")
     print(f"  LLM call : {'yes' if answer.used_llm else 'NO - answered without the model'}")
     if answer.model:
         print(f"  model    : {answer.model}")
@@ -120,16 +137,28 @@ def main() -> int:
                         help="hide the retrieved chunk detail")
     parser.add_argument("--all", action="store_true",
                         help="print every retrieved chunk, including sub-threshold ones")
+    parser.add_argument("--no-memory", action="store_true",
+                        help="do not remember previous questions, and do not "
+                             "rewrite follow-ups (each question stands alone)")
     args = parser.parse_args()
 
     if not config.GROQ_API_KEY:
         print("GROQ_API_KEY is not set. Add it to .env before asking questions.")
         return 1
 
+    conversation = None if args.no_memory else memory.Conversation()
+
     print(BAR)
     print("SBI Mutual Fund FAQs - facts only, no investment advice")
     print(f"model {config.LLM_MODEL} | top-{config.TOP_K} | "
           f"similarity floor {config.MIN_SIMILARITY}")
+    if conversation is None:
+        print("Memory off: follow-ups are not rewritten and nothing is "
+              "remembered.")
+    else:
+        print(f"Memory on: last {conversation.limit} messages, so \"what about "
+              f"its fees?\"\nresolves to the scheme under discussion. "
+              f"/history, /reset.")
     print("Type a question, or /quit to exit. /chunks N, /all, /filter, /help")
     print(BAR)
 
@@ -140,7 +169,8 @@ def main() -> int:
 
     if args.question:
         for question in args.question:
-            run_one(question, collection, show_context, hit_limit, show_all)
+            run_one(question, collection, show_context, hit_limit, show_all,
+                    conversation)
             print()
         return 0
 
@@ -161,6 +191,10 @@ def main() -> int:
                   f"{hit_limit})")
             print("  /all        include sub-threshold chunks too")
             print("  /filter     show the scheme filter decision only")
+            if conversation is not None:
+                print(f"  /history    the {len(conversation)} message(s) "
+                      f"remembered")
+                print("  /reset      forget them")
             print("  /quit       exit")
             continue
         if lowered.startswith("/chunks"):
@@ -175,13 +209,27 @@ def main() -> int:
             show_all = not show_all
             print(f"  show sub-threshold chunks: {show_all}")
             continue
+        if lowered == "/history":
+            if conversation is None:
+                print("  memory is off (--no-memory)")
+            else:
+                print(conversation.transcript())
+            continue
+        if lowered == "/reset":
+            if conversation is None:
+                print("  memory is off (--no-memory)")
+            else:
+                conversation.clear()
+                print("  forgotten; the next question has no context")
+            continue
         if lowered == "/filter":
             scheme = retrieval.detect_scheme(question)
             print(f"  detected scheme: {scheme or 'none'}")
             continue
 
         try:
-            run_one(question, collection, show_context, hit_limit, show_all)
+            run_one(question, collection, show_context, hit_limit, show_all,
+                    conversation)
         except Exception as exc:  # noqa: BLE001 - keep the REPL alive
             print(f"\n  ! {type(exc).__name__}: {exc}")
 

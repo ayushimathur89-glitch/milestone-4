@@ -140,6 +140,19 @@ ALLOWED_DOMAINS = (
     "sebi.co.in",
 )
 
+# --- Conversation memory ---
+# The REPL keeps the last 10 messages (5 question/answer exchanges) so a
+# follow-up like "what about its fees?" can be rewritten into a standalone
+# question before retrieval. Without that, "its" is a stopword and the scheme
+# filter never engages, so the search degenerates to matching "fees" across
+# every scheme in the collection.
+#
+# 10 is a choice about how far back a pronoun can reach, not a token budget.
+# Longer history raises the chance that "its" picks up a scheme the user has
+# already moved on from, and a wrong filter silently hides the correct answer.
+MEMORY_ENABLED = True
+MEMORY_MAX_MESSAGES = 10
+
 # --- Guards ---
 
 

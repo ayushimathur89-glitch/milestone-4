@@ -1,13 +1,21 @@
 """Answer generation via Groq, wrapped in the Phase 4 contract.
 
 The prompt states the answer rules, but the prompt is not the enforcement.
-Three layers have to agree before a user sees anything:
+Four layers have to agree before a user sees anything:
 
-1. `guardrails.classify` refuses advisory, performance, PII and off-topic
+1. `memory.resolve_followup` rewrites a follow-up into a standalone question
+   before anything else, because `guardrails.classify` and `retrieval.retrieve`
+   both read the scheme out of the question, and "what about its fees?" names
+   none. Resolving first means the routing decision is made on the question
+   that will actually be searched.
+2. `guardrails.classify` refuses advisory, performance, PII and off-topic
    questions *before* retrieval, so a refused query never reaches this module
-   and never becomes a Groq call.
-2. `guardrails.verify_answer` checks the generated text and repairs it.
-3. The "Last updated" line is appended here from the cited chunk's
+   and never becomes a Groq call. A rewrite cannot make a refused question
+   allowed: the rules only substitute a scheme name, so "should I buy it?"
+   becomes "should I buy SBI Flexicap Fund?" and is still a recommendation
+   request.
+3. `guardrails.verify_answer` checks the generated text and repairs it.
+4. The "Last updated" line is appended here from the cited chunk's
    `fetched_at`, never taken from the model. The prompt tells the model not to
    state a date, and the post-check catches it if it does anyway.
 
@@ -23,6 +31,7 @@ from dataclasses import dataclass, field
 
 import config
 import guardrails
+import memory
 import retrieval
 from ingest import embedder
 
@@ -137,6 +146,13 @@ class Answer:
     keyword_hit: bool = False
     elapsed: float = 0.0
     model: str = ""
+    # The question as typed versus the question that was actually searched.
+    # Both are kept because a rewritten follow-up is a guess about what the
+    # user meant, and the answer has to be auditable against the real wording.
+    resolved_question: str = ""
+    inherited_scheme: str | None = None
+    rewrite_notes: str = ""
+    remembered: bool = False
 
     @property
     def grounded(self) -> bool:
@@ -149,21 +165,55 @@ class Answer:
         return self.used_llm and not self.refused and not self.declined
 
 
-def ask(question: str, show_context: bool = False, collection=None) -> Answer:
-    """Full pipeline: classify, retrieve, generate, verify.
+def ask(question: str, show_context: bool = False, collection=None,
+        conversation: memory.Conversation | None = None) -> Answer:
+    """Full pipeline: resolve, classify, retrieve, generate, verify.
 
     Returns an `Answer` describing what happened, so the CLI can show the
     retrieved chunks and the caller can tell a refusal from a real answer
     without parsing prose.
+
+    `conversation` is optional, and passing None keeps the old single-turn
+    behaviour: nothing is remembered and no rewriting happens. When it is
+    supplied, the resolved question and the answer are appended to it.
     """
     started = time.perf_counter()
 
-    decision = guardrails.classify(question)
+    # Before classification, not after. Routing and retrieval both read the
+    # scheme out of the question, so a follow-up has to name one before either
+    # of them can be right.
+    rewrite = memory.resolve_followup(question, conversation)
+    search_question = rewrite.resolved
+
+    def finish(*, pii: bool = False, **fields) -> Answer:
+        """Build the Answer and record the exchange, in one place.
+
+        A PII refusal is never recorded. The account number in that question is
+        exactly what must not sit in a buffer a later turn can quote back, and
+        deciding that at the call site would be one more thing to forget.
+        Every other refusal is stored, because "is it taxable?" being
+        remembered is what lets the next turn resolve "and its exit load?".
+        """
+        remembered = False
+        if conversation is not None and not pii:
+            stored = conversation.add("user", question)
+            stored &= conversation.add("assistant", fields.get("answer", ""))
+            remembered = stored
+        return Answer(
+            question=question,
+            resolved_question=search_question,
+            inherited_scheme=rewrite.scheme,
+            rewrite_notes=rewrite.rewrite_notes,
+            remembered=remembered,
+            **fields,
+        )
+
+    decision = guardrails.classify(search_question)
     if decision.refused:
         # No retrieval and no Groq call: the guardrail is meant to hold
         # structurally, and spec verification step 4 checks it by request log.
-        return Answer(
-            question=question,
+        return finish(
+            pii=decision.category == "pii",
             category=decision.category,
             answer=decision.message,
             used_llm=False,
@@ -172,13 +222,12 @@ def ask(question: str, show_context: bool = False, collection=None) -> Answer:
             elapsed=time.perf_counter() - started,
         )
 
-    result = retrieval.retrieve(question, collection=collection)
+    result = retrieval.retrieve(search_question, collection=collection)
     hits = result.hits
     above = result.above_floor()
 
     if not result.has_usable_context:
-        return Answer(
-            question=question,
+        return finish(
             category=decision.category,
             answer=guardrails.no_context_answer(),
             used_llm=False,
@@ -196,8 +245,7 @@ def ask(question: str, show_context: bool = False, collection=None) -> Answer:
     context = build_context(above)
     citation = _pick_citation(above)
     if citation is None:
-        return Answer(
-            question=question,
+        return finish(
             category=decision.category,
             answer=guardrails.no_context_answer(),
             used_llm=False,
@@ -218,7 +266,7 @@ def ask(question: str, show_context: bool = False, collection=None) -> Answer:
             {"role": "system", "content": system_prompt()},
             {"role": "user", "content":
                 f"Source context:\n\n{context}\n\n"
-                f"Question: {question}"},
+                f"Question: {search_question}"},
         ],
     )
     raw = (response.choices[0].message.content or "").strip()
@@ -229,8 +277,7 @@ def ask(question: str, show_context: bool = False, collection=None) -> Answer:
     )
     declined = guardrails.is_decline(verified.answer)
 
-    return Answer(
-        question=question,
+    return finish(
         category=decision.category,
         answer=verified.answer,
         used_llm=True,

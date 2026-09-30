@@ -88,7 +88,12 @@ on every cold start. See [`Docs/architecture.md`](Docs/architecture.md) §4.
   redirected to the official factsheet.
 - No PII is accepted, stored, or logged. Queries containing a PAN, Aadhaar
   number, account number, OTP, email, or phone number are refused and not
-  retained.
+  retained, including in the conversation buffer.
+- Follow-up questions are resolved against the last 10 messages, so "what about
+  its fees?" is searched as a question about the scheme under discussion.
+  Unresolvable follow-ups are searched as typed, and the CLI prints the
+  rewritten question whenever one is used. `/history`, `/reset` and
+  `--no-memory` control the buffer.
 - The embedding model is downloaded on first run (~90 MB).
 
 ## Documentation
