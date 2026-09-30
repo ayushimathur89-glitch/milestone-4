@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 
 import config
 import guardrails
+import llm_cache
 import memory
 import retrieval
 from ingest import embedder
@@ -52,6 +53,70 @@ def get_client():
 
         _CLIENT = Groq(api_key=config.GROQ_API_KEY)
     return _CLIENT
+
+
+MSG_MODEL_UNAVAILABLE = (
+    "The assistant model is temporarily unavailable, so no answer could be "
+    "generated. This is a provider limit, not a gap in the sources - the "
+    "figures are in the official documents, and the same question will answer "
+    "once the limit resets."
+)
+
+
+def _describe_api_error(exc: Exception) -> str:
+    """A short, honest description of why the model could not be called.
+
+    The distinction that matters downstream is rate limiting versus everything
+    else, because a daily token cap is a wall with a timer on it and a 500 is
+    not. Both are reported the same way to the user, but only the first is
+    worth retrying later rather than debugging.
+    """
+    text = str(exc)
+    if "rate_limit" in text or "429" in text or "TPD" in text:
+        return "the free tier's daily token limit is exhausted"
+    if "401" in text or "unauthorized" in text.lower():
+        return "the API key was rejected"
+    return f"the request failed ({type(exc).__name__})"
+
+
+def complete(system: str, user: str) -> tuple[str, str, str]:
+    """One model call, cached. Returns (text, model_name, error).
+
+    `error` is empty on success. It is returned rather than raised because a
+    provider failure is not a bug in this pipeline, and the caller has a
+    correct thing to do with it: say the model is unavailable. Raising would
+    either crash the app or force every caller to catch, and the CLI, the web
+    app and three test suites all call this.
+
+    The cache sits here, at the single place a completion is produced, rather
+    than at the call sites, so no path can bypass it and no path can
+    double-count it.
+    """
+    key = llm_cache.request_key(model=config.LLM_MODEL, system=system, user=user)
+
+    cached = llm_cache.load(key)
+    if cached is not None:
+        return cached, config.LLM_MODEL, ""
+
+    try:
+        response = get_client().chat.completions.create(
+            model=config.LLM_MODEL,
+            temperature=config.LLM_TEMPERATURE,
+            max_tokens=config.LLM_MAX_TOKENS,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001 - any provider failure, one response
+        return "", "", _describe_api_error(exc)
+
+    text = (response.choices[0].message.content or "").strip()
+    model = getattr(response, "model", config.LLM_MODEL) or config.LLM_MODEL
+    if not text:
+        return "", model, "the model returned an empty response"
+    llm_cache.store(key, text, model)
+    return text, model, ""
 
 
 def system_prompt() -> str:
@@ -156,6 +221,12 @@ class Answer:
     inherited_scheme: str | None = None
     rewrite_notes: str = ""
     remembered: bool = False
+    # Set when the model could not be called at all - a rate limit, a rejected
+    # key, a provider error. Empty means nothing went wrong upstream. This is
+    # the flag that keeps an infrastructure failure from being reported as a
+    # fact about the corpus, so it is tracked rather than inferred from
+    # `used_llm`, which is also False for a correct guardrail refusal.
+    llm_error: str = ""
 
     @property
     def grounded(self) -> bool:
@@ -166,6 +237,17 @@ class Answer:
         answered when the model said it had nothing to go on.
         """
         return self.used_llm and not self.refused and not self.declined
+
+    @property
+    def unavailable(self) -> bool:
+        """Whether the pipeline was healthy and the model simply was not there.
+
+        A fourth outcome alongside answered, declined and refused. Reporting it
+        as any of the other three would be a lie about where the failure
+        happened, and a suite that could not tell them apart would be able to
+        pass with the provider down.
+        """
+        return bool(self.llm_error)
 
     @property
     def scheme_label(self) -> str:
@@ -205,12 +287,27 @@ def ask(question: str, show_context: bool = False, collection=None,
         deciding that at the call site would be one more thing to forget.
         Every other refusal is stored, because "is it taxable?" being
         remembered is what lets the next turn resolve "and its exit load?".
+
+        A model-unavailable turn is recorded for the same reason as a guardrail
+        refusal: the user really did ask that question, and "and its exit load?"
+        should still resolve after a rate-limited turn. What is not recorded is
+        the placeholder text as an *answer*, because the rewriter prefers user
+        turns but does fall back to answers, and a buffer full of "the model is
+        temporarily unavailable" would quietly poison every later rewrite.
         """
         remembered = False
         if conversation is not None and not pii:
             stored = conversation.add("user", question)
-            stored &= conversation.add("assistant", fields.get("answer", ""))
-            remembered = stored
+            if fields.get("llm_error"):
+                # Unbalanced on purpose: one user turn, no answer. The rewriter
+                # reads roles by position, not in pairs, so a lone user turn
+                # resolves correctly and there is nothing to misquote.
+                remembered = stored
+            else:
+                stored &= conversation.add(
+                    "assistant", fields.get("answer", "")
+                )
+                remembered = stored
         return Answer(
             question=question,
             resolved_question=search_question,
@@ -269,20 +366,29 @@ def ask(question: str, show_context: bool = False, collection=None,
             elapsed=time.perf_counter() - started,
         )
 
-    client = get_client()
-    response = client.chat.completions.create(
-        model=config.LLM_MODEL,
-        temperature=config.LLM_TEMPERATURE,
-        max_tokens=config.LLM_MAX_TOKENS,
-        messages=[
-            {"role": "system", "content": system_prompt()},
-            {"role": "user", "content":
-                f"Source context:\n\n{context}\n\n"
-                f"Question: {search_question}"},
-        ],
+    raw, model, error = complete(
+        system_prompt(),
+        f"Source context:\n\n{context}\n\nQuestion: {search_question}",
     )
-    raw = (response.choices[0].message.content or "").strip()
-    model = getattr(response, "model", config.LLM_MODEL)
+    if error:
+        # Deliberately not a decline. A decline is a claim about the corpus -
+        # "the sources do not contain this" - and this is a claim about the
+        # provider. Collapsing the two would let a rate limit show up in the
+        # pipeline report as evidence about the corpus, which is exactly the
+        # kind of miscounting the adjudicated-decline work exists to prevent.
+        return finish(
+            category=decision.category,
+            answer=MSG_MODEL_UNAVAILABLE,
+            used_llm=False,
+            refused=True,
+            declined=False,
+            scheme_filter=result.scheme_filter,
+            hits=hits,
+            above_floor=above,
+            problems=(f"model unavailable: {error}",),
+            llm_error=error,
+            elapsed=time.perf_counter() - started,
+        )
 
     verified = guardrails.verify_answer(
         raw, citation.source_url, citation.fetched_at, context=context

@@ -23,6 +23,13 @@ data/raw/*
 # store must be committed for the app to start without re-ingesting.
 # See Docs/architecture.md section 4.
 
+# Cached model responses, keyed by the SHA-256 of the request. Ignored because
+# it is an optimisation for a rate-limited provider, not a source of truth:
+# llm_cache is keyed on the full request, so a hit is only ever a repeat of a
+# call already made, and deleting this directory changes nothing but speed and
+# token spend.
+data/llm_cache/
+
 # Local tool state
 .streamlit/secrets.toml
 .DS_Store

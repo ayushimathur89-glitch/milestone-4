@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import re
 import sys
+import tempfile
 import time
+from pathlib import Path
 
 import config
 import generator
 import guardrails
+import llm_cache
 import retrieval
 from ingest import store
 
@@ -131,7 +134,7 @@ _DATE_IN_ANSWER = re.compile(
     r"20\d{2}-\d{2}-\d{2}|\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|"
     r"oct|nov|dec)[a-z]*\s+20\d{2})\b"
 )
-_PASS, _FAIL = "ok  ", "FAIL"
+_PASS, _FAIL, _SKIP = "ok  ", "FAIL", "skip"
 
 
 def _rule(title: str) -> None:
@@ -145,10 +148,68 @@ def _body(answer: generator.Answer) -> str:
     return answer.answer.split(config.LAST_UPDATED_PREFIX)[0].strip()
 
 
+def check_cache_keying() -> bool:
+    """The cache may only ever return a repeat of a call already made.
+
+    This is the whole safety argument for a response cache in a RAG pipeline,
+    and it is worth asserting rather than describing: the question is the same
+    on a re-run, but the *context* is what decides the answer, so a key that
+    ignored the context would happily re-serve an answer derived from a corpus
+    that has since been re-ingested. Costs no tokens.
+    """
+    _rule("0b. RESPONSE CACHE: keying and round-trip (no API call)")
+    ok = True
+    base = dict(model=config.LLM_MODEL, system="rules", user="ctx-v1 | Q?")
+
+    def expect(label: str, good: bool, detail: str = "") -> None:
+        nonlocal ok
+        ok = ok and good
+        print(f"  {_PASS if good else _FAIL} {label}{('  ' + detail) if detail else ''}")
+
+    same = llm_cache.request_key(**base)
+    expect("an identical request keys identically",
+           same == llm_cache.request_key(**base))
+
+    # The three that must miss. Each is a real way a stale answer could be
+    # served, so each is a bug if it collides.
+    expect("a changed context misses",
+           llm_cache.request_key(**{**base, "user": "ctx-v2 | Q?"}) != same,
+           "same question, different retrieved chunks")
+    expect("a changed prompt misses",
+           llm_cache.request_key(**{**base, "system": "rules v2"}) != same)
+    expect("a changed model misses",
+           llm_cache.request_key(**{**base, "model": "other/model"}) != same)
+
+    original = llm_cache.CACHE_DIR
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            llm_cache.CACHE_DIR = Path(tmp)
+            expect("empty cache misses", llm_cache.load(same) is None)
+            llm_cache.store(same, "an answer", "stub")
+            expect("a stored response hits", llm_cache.load(same) == "an answer")
+            llm_cache.store(same, "   ", "stub")
+            expect("a blank response is not cached",
+                   llm_cache.load(same) == "an answer")
+            # A truncated write is the realistic corruption, and it must read
+            # as a miss rather than take the request down.
+            llm_cache._path(same).write_text("{not json", encoding="utf-8")
+            expect("a corrupt entry reads as a miss, not a crash",
+                   llm_cache.load(same) is None)
+        finally:
+            llm_cache.CACHE_DIR = original
+
+    print(f"\n  {llm_cache.describe()}")
+    return ok
+
+
 def check_citations(answers) -> bool:
     _rule("1. CITATIONS: exactly one link, allowed domain")
     ok = True
     for answer in answers:
+        if answer.unavailable:
+            print(f"  {_SKIP} model unavailable, nothing to check  "
+                  f"{answer.question[:44]}")
+            continue
         body = _body(answer)
         urls = guardrails.count_urls(body)
         allowed = bool(answer.source_url) and config.is_allowed_url(answer.source_url)
@@ -167,6 +228,10 @@ def check_length_and_date(answers) -> bool:
     _rule("2. LENGTH AND DATE: <=3 sentences, app-supplied date")
     ok = True
     for answer in answers:
+        if answer.unavailable:
+            print(f"  {_SKIP} model unavailable, nothing to check  "
+                  f"{answer.question[:44]}")
+            continue
         body = _body(answer)
         sentences = guardrails.count_sentences(body)
         has_prefix = config.LAST_UPDATED_PREFIX in answer.answer
@@ -212,6 +277,10 @@ def check_grounding(answers) -> bool:
     _rule("4. GROUNDING: every figure in the answer is in a retrieved chunk")
     ok = True
     for answer in answers:
+        if answer.unavailable:
+            print(f"  {_SKIP} model unavailable, nothing to check  "
+                  f"{answer.question[:44]}")
+            continue
         body = _body(answer)
         figures = [f.group(0).strip().lower() for f in _FIGURE.finditer(body)]
         if not figures:
@@ -242,6 +311,14 @@ def check_out_of_corpus(collection) -> bool:
     ok = True
     for question in OUT_OF_CORPUS:
         answer = generator.ask(question, collection=collection)
+        if answer.unavailable:
+            # "Refused instead of inventing" is a claim about the model's
+            # behaviour under a working provider. With the provider down there
+            # is nothing to judge, and failing here would blame the pipeline for
+            # Groq's quota.
+            print(f"  {_SKIP} model unavailable, nothing to check  "
+                  f"{question[:44]}")
+            continue
         said_no = (
             "not in the" in answer.answer.lower()
             or "could not find" in answer.answer.lower()
@@ -338,6 +415,7 @@ def main() -> int:
     print(f"collection: {collection.count():,} vectors | model {config.LLM_MODEL}")
     print(f"top-{config.TOP_K} | floor {config.MIN_SIMILARITY} | "
           f"cap {config.MAX_ANSWER_SENTENCES} sentences")
+    print(f"llm_cache: {llm_cache.describe()}")
 
     _rule("0. THE 10 PRD QUESTIONS")
     answers: list[generator.Answer] = []
@@ -345,7 +423,9 @@ def main() -> int:
         started = time.perf_counter()
         answer = generator.ask(question, collection=collection)
         answers.append(answer)
-        if answer.grounded:
+        if answer.unavailable:
+            status = f"MODEL UNAVAILABLE ({answer.llm_error})"
+        elif answer.grounded:
             status = "answer"
         elif answer.declined:
             status = "DECLINED by the model (context insufficient)"
@@ -361,6 +441,7 @@ def main() -> int:
             print(f"       repairs : {answer.repairs}")
 
     results = {
+        "response cache": check_cache_keying(),
         "citations": check_citations(answers),
         "length and date": check_length_and_date(answers),
         "grounding": check_grounding(answers),
@@ -375,9 +456,29 @@ def main() -> int:
         print(f"  {_PASS if passed else _FAIL} {name}")
     answered = sum(1 for a in answers if a.grounded)
     declined = sum(1 for a in answers if a.declined)
+    unavailable = sum(1 for a in answers if a.unavailable)
+    routed = len(PRD_QUESTIONS) - answered - declined - unavailable
     print(f"\n  {answered}/{len(PRD_QUESTIONS)} PRD questions answered, "
-          f"{declined} declined, "
-          f"{len(PRD_QUESTIONS) - answered - declined} routed away")
+          f"{declined} declined, {routed} routed away, "
+          f"{unavailable} model-unavailable")
+
+    if unavailable:
+        # Checked before the decline accounting on purpose. A provider outage
+        # produces answers that are not grounded, and counting them as
+        # declines would both overstate the corpus gaps and hide the real
+        # cause. Reporting "the model was down" as "the sources lacked the
+        # answer" is the one thing this report must never do.
+        print(f"\n  {_FAIL} {unavailable} question(s) could not be verified "
+              f"because the model was unavailable:\n"
+              f"    {unavailable} of {len(PRD_QUESTIONS)} PRD questions are "
+              f"unverified, not failed.\n"
+              f"    Nothing below says anything about the corpus until the "
+              f"limit resets.\n"
+              f"    Re-run the same command once it does; identical requests "
+              f"are served\n    from data/llm_cache, so only the unverified "
+              f"ones cost tokens.")
+        return 1
+
     if declined:
         gaps = len(SOURCE_GAP_DECLINES)
         unexplained = declined - gaps

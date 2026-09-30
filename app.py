@@ -158,6 +158,19 @@ def _split_citation(answer: generator.Answer) -> tuple[str, str]:
 
 
 def _render_answer(answer: generator.Answer) -> None:
+    if answer.unavailable:
+        # Not an exception. A daily token cap is a wall with a timer on it, and
+        # crashing the page or dumping a traceback tells the user nothing they
+        # can act on. What they can act on is "come back later".
+        st.warning(answer.answer)
+        st.caption("The retrieved sources for this question are still listed "
+                   "below, so you can read the figure directly while the "
+                   "assistant is unavailable.")
+        if answer.problems:
+            st.caption(f"Reason: {answer.problems[0]}")
+        _sources_expander(answer)
+        return
+
     body, link = _split_citation(answer)
     st.markdown(body)
     if link:
