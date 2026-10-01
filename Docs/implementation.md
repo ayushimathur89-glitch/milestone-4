@@ -87,14 +87,14 @@ The critical deliverable of this phase is `data/chunks.txt`: every chunk written
 - `ingest/embedder.py`
 - `ingest/store.py`
 - Update `ingest/run_ingestion.py` to the full load → chunk → embed → store pipeline
-- `data/chroma/` (generated — persisted, and **git-ignored**)
+- `data/chroma/` (generated — persisted, and **committed to git**)
 
 ### What this phase does
 `embedder.py` wraps `sentence-transformers/all-MiniLM-L6-v2`, downloading it once on first run (~90 MB, then cached locally forever — this is the "no API key" property from the brief). It is a **single shared instance** used by both this phase and `retrieval.py` in Phase 5, so chunk vectors and question vectors are guaranteed to come from the same model and occupy the same 384-dim space.
 
 `store.py` creates a ChromaDB `PersistentClient` rooted at `data/chroma/`, with one collection. Chunk text goes in the document, the 7 metadata fields go in the metadata, and the embedding is stored. Ingestion is idempotent — re-running replaces the collection rather than duplicating it.
 
-By the end of this phase, ingestion runs once end-to-end and the vector store survives a process restart. **Git-ignore `data/chroma/`** (a few MB for 5 schemes) and rebuild it during the Render build instead: that filesystem is ephemeral, so a committed store would be neither readable nor durable, and the blobs are regenerable from `data/sources.csv` anyway. See architecture.md §4.
+By the end of this phase, ingestion runs once end-to-end and the vector store survives a process restart. **Commit `data/chroma/`** (21 MiB for 2,727 vectors) so that Render, whose filesystem is ephemeral, has a store to read on every wake-up. There is no runtime rebuild path: `app.py` opens the collection directly and `open_collection` raises if it is absent. See architecture.md §4.
 
 ### How to verify
 1. Run full ingestion. It should print stage counts: chunks loaded, vectors stored, and the collection size.
@@ -197,7 +197,7 @@ Nothing new to the RAG pipeline happens in this phase — the app is a thin clie
 4. Enter a PAN-shaped string and confirm it is refused, that the PAN text does **not** appear in the on-screen transcript, and that it is absent from the Streamlit logs.
 5. Paste an answer containing a markdown link and confirm it renders as a clickable link, not raw text.
 6. **Cold-start test:** stop the app, delete nothing, restart it. Confirm it does **not** re-ingest (Phase 3 persistence) and the first answer is fast.
-7. **Render deploy:** push to GitHub, create a Render web service with root directory **empty** (`app.py` is at the repo root), build `pip install -r requirements.txt && python -m ingest.run_ingestion`, start `streamlit run app.py --server.port $PORT --server.address 0.0.0.0`, set `GROQ_API_KEY` and `PYTHON_VERSION=3.14` in the dashboard, and confirm the app loads and answers a question in the browser. Confirm the build log shows the full `load -> chunk -> embed -> store` pipeline — that is the store being rebuilt, and it is now the expected behaviour rather than a fault. Note two things while watching it: the ~90 MB embedding model download and the embedding pass both happen inside the build, so allow minutes rather than seconds, and an instance at the free tier's 512 MB will be killed partway through, so use a paid one.
+7. **Render deploy:** commit `data/chroma/`, push to GitHub, create a Render web service with root directory **empty** (`app.py` is at the repo root), build `pip install -r requirements.txt` and start `streamlit run app.py --server.port $PORT --server.address 0.0.0.0`, set `GROQ_API_KEY` and `PYTHON_VERSION=3.14` in the dashboard, and confirm the app loads and answers a question in the browser. Confirm the build log shows **no** ingestion output — the store is committed, and ingestion at build time was tried and reverted (see architecture.md §4). The first cold start is slow because the ~90 MB embedding model downloads; that is expected. **Then wait for the service to spin down and load the URL again**, which is the check that matters: the ephemeral filesystem wipes anything written at runtime, so only a committed store survives a restart.
 8. Read `README.md` top to bottom as if you were a grader receiving this fresh: setup works, scope (AMC + 5 schemes) is stated, known limits are honest.
 
 ### Exit criteria

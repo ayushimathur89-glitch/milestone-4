@@ -18,10 +18,10 @@ Two decisions worth stating because they bite later:
    old collection and creates a fresh one, so a run's contents are a pure
    function of that run's sources.
 
-Only `.gitkeep` is committed. The store's binary blobs are regenerable from
-`data/sources.csv`, so they are git-ignored like `data/raw/`; the cost is that
-Render, whose filesystem is ephemeral, must run the pipeline at build time
-rather than reading a committed store. See Docs/architecture.md section 4.
+The directory is committed to git. Render's free tier has an ephemeral
+filesystem, so the store must be in the repo: `app.py` opens the collection
+directly and `open_collection` raises if it is absent, so there is no runtime
+rebuild path. See Docs/architecture.md section 4.
 """
 
 from __future__ import annotations

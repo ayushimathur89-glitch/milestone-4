@@ -66,17 +66,8 @@ It prints the key masked, never in full.
 
 ## Run the app
 
-The vector store is git-ignored, so a fresh clone has nothing in `data/chroma/`
-and must ingest once before the app can answer anything.
-
-```bash
-.venv\Scripts\python -m ingest.run_ingestion
-```
-
-That fetches every URL in `data/sources.csv`, chunks and embeds the corpus, and
-writes the store to `data/chroma/`. It is idempotent: re-running replaces the
-collection rather than appending. On a machine that has already ingested, skip
-this step - the store persists locally and restarts do not re-ingest.
+The vector store is committed to the repo, so a fresh clone already has one and
+there is nothing to ingest first.
 
 ```bash
 .venv\Scripts\python -m streamlit run app.py
@@ -131,24 +122,22 @@ adjudication of every decline.
 | Working prototype | [`app.py`](app.py) |
 | Source list | [`data/sources.csv`](data/sources.csv) |
 | Inspectable chunks | `data/chunks.txt` |
-| Persisted vector store | `data/chroma/` (git-ignored; rebuilt by ingestion) |
+| Persisted vector store | `data/chroma/` (committed on purpose, see below) |
 | Sample Q&A | [`samples/sample_qa.md`](samples/sample_qa.md) |
 | Disclaimer snippet | `config.DISCLAIMER`, shown in the UI |
 
 ## Deploying to Render
 
 Root directory **empty** (`app.py` is at the repo root), build
-`pip install -r requirements.txt && python -m ingest.run_ingestion`, start
+`pip install -r requirements.txt` and start
 `streamlit run app.py --server.port $PORT --server.address 0.0.0.0`.
 
 Set `GROQ_API_KEY` and `PYTHON_VERSION=3.14` in the dashboard.
 
-`data/chroma/` is git-ignored, so the build command re-runs the pipeline
-instead: Render's filesystem is ephemeral and the store is regenerable from
-`data/sources.csv`. Two consequences to expect — the build fetches every source
-over the network and exits non-zero if any demo fact goes missing, and it needs
-more than the free tier's 512 MB to hold the embedding model, so use a paid
-instance. See [`Docs/architecture.md`](Docs/architecture.md) §4.
+`data/chroma/` is deliberately committed: Render's filesystem is ephemeral, so
+the persisted vector store must ship with the repo. The build does **not** run
+the ingestion pipeline (doing so requires live third-party fetches and more
+memory than the free tier has). See [`Docs/architecture.md`](Docs/architecture.md) §4.
 
 ## Known limits
 
