@@ -1,4 +1,4 @@
-"""Stage 1 of ingestion: fetch each allowed source URL and save clean text.
+﻿"""Stage 1 of ingestion: fetch each allowed source URL and save clean text.
 
 Reads `data/sources.csv` (hand-curated, never rewritten by this module) and
 writes one readable `.txt` per source into `data/raw/`, plus a run report in
@@ -50,7 +50,7 @@ _JUNK_LINE = re.compile(
     r"^(invest now|know more|click here|read more|view all|apply now|"
     r"disclaimer|mutual fund investments are subject to market risks.*|"
     r"join us|for distributor|english|hindi|skip to|contact us|"
-    r"\+?\d[\d\s\-()]{7,}|www\.[\w.]+|copyright.*|©.*)$",
+    r"\+?\d[\d\s\-()]{7,}|www\.[\w.]+|copyright.*|Â©.*)$",
     re.I,
 )
 # Whole blocks that are page furniture rather than content. The campaign pages
@@ -473,6 +473,178 @@ def load_one(row: dict[str, str]) -> LoadedDocument:
     return LoadedDocument(source=source, title=title, blocks=blocks)
 
 
+def _fingerprint(text: str) -> str:
+    """A whitespace- and case-insensitive fingerprint of a block's words."""
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    return " ".join(words)
+
+
+# How many consecutive words make one shingle, and the two thresholds a block
+# must clear to be called furniture. Both were set by measuring every HTML
+# block in this corpus, not by taste; the numbers quoted in the docstrings
+# below are the measured scores.
+_SHINGLE_WORDS = 12
+_FURNITURE_COVERAGE = 0.50
+
+# Words that name site furniture rather than a fund. Deliberately generic
+# navigation vocabulary and nothing scheme-specific, so it cannot match a
+# sentence that happens to be about a fund.
+_CHROME_VOCABULARY = frozenset("""
+about corporate profile fund house expertise people desk registrars careers
+csr forms downloads factsheets portfolios statement additional information
+offer document sid kim tenders notices addendums tax reckoner expense ratio
+navs alert idcw history esg disclosures valuation debt securities home menu
+loading contact investor existing governance annual report board directors
+auditor managerial personnel prescribed
+""".split())
+_CHROME_VOCABULARY_SHARE = 0.35
+_SELF_REPEAT_SHARE = 0.50
+
+
+def _boilerplate_counts(documents: list[LoadedDocument]) -> set[str]:
+    """The leading shingles of blocks that are site furniture, not content.
+
+    Site furniture is the navigation list, the breadcrumb trail, the footer and
+    the "Loading..." shells. None of it is tagged as chrome, so the structural
+    filters above cannot see it, and it survives into the corpus as content.
+
+    That is not merely untidy. A nav block scores a middling dense similarity
+    against any question, because it is built from the same words as every page
+    on the site, and it then competes for one of the six context slots a real
+    answer needs. Measured on "Where can I find the KIM/SID for SBI Balanced
+    Advantage Fund?", two such blocks took slots 3 and 4 and pushed the
+    load-structure chunk down the context the model actually reads.
+
+    Two independent tests, because furniture hides from either one alone.
+
+    **Shared shingles** catch text that appears on more than one page - the
+    breadcrumb trail, the repeated CTA. The shingle is the first twelve words
+    rather than the whole block, so a content block that opens with a phrase
+    the site also uses elsewhere is not lost; only the prefix is matched, and
+    the block is kept when the prefix is not shared.
+
+    **Self-repetition plus chrome vocabulary** catch furniture confined to one
+    page. The nav on `ways-to-invest` renders its whole menu in the header and
+    again in the mobile drawer, inside a single block, so it appears exactly
+    once to any cross-page test and survived the first version of this function
+    intact. Both signals are required together, and the separation is wide
+    enough to measure rather than argue: on this corpus the nav scores 0.78
+    self-repeated and 0.53 chrome vocabulary, while the most repetitive genuine
+    content - the ELSS campaign page, which restates its own lock-in sentence in
+    a summary and again in the body - scores 1.00 and 0.06. Repetition alone
+    would have deleted a real answer, and vocabulary alone would have caught
+    prose that happens to discuss fund categories.
+    """
+    counts: dict[str, int] = {}
+    repeated_here: set[str] = set()
+    for document in documents:
+        seen_here: set[str] = set()
+        for block in document.blocks:
+            words = _fingerprint(block).split()
+            if not words:
+                continue
+            if len(words) < 6:
+                continue
+            if _is_self_repeating_furniture(words):
+                shingle = " ".join(words[:_SHINGLE_WORDS])
+                repeated_here.add(shingle)
+                continue
+            shingle = " ".join(words[:_SHINGLE_WORDS])
+            if len(shingle.split()) < 6:
+                continue
+            if shingle in seen_here:
+                repeated_here.add(shingle)
+                continue
+            seen_here.add(shingle)
+            counts[shingle] = counts.get(shingle, 0) + 1
+
+    return {k for k, v in counts.items() if v > 1} | repeated_here
+
+
+def _is_self_repeating_furniture(words: list[str]) -> bool:
+    """Whether a block repeats itself *and* is built from navigation words.
+
+    Both conditions, because each is wrong on its own. The ELSS campaign page
+    repeats a 12-word run across its whole block - measured share 1.00 - and is
+    entirely genuine content, so repetition alone cannot be the test. The nav
+    block repeats at 0.78 and carries 0.53 of its words from
+    `_CHROME_VOCABULARY`; the next-most-chrome real block on the site is at
+    0.15. Requiring both puts the boundary in a wide gap rather than on a
+    cliff.
+    """
+    if len(words) < _SHINGLE_WORDS + 1:
+        return False
+    shared = sum(1 for word in words if word in _CHROME_VOCABULARY)
+    if shared / len(words) < _CHROME_VOCABULARY_SHARE:
+        return False
+    return _repeat_share(words) >= _SELF_REPEAT_SHARE
+
+
+def _repeat_share(words: list[str]) -> float:
+    """Fraction of a block's words that fall inside a repeated shingle.
+
+    Every window is scanned, not just the leading one, because a rendered menu
+    does not have to start with the thing it repeats.
+    """
+    seen: dict[tuple[str, ...], int] = {}
+    repeats: set[tuple[str, ...]] = set()
+    for start in range(len(words) - _SHINGLE_WORDS + 1):
+        window = tuple(words[start:start + _SHINGLE_WORDS])
+        if window in seen:
+            repeats.add(window)
+        seen[window] = seen.get(window, 0) + 1
+    if not repeats:
+        return 0.0
+    # Both copies count, not just the later one: a menu printed twice makes the
+    # whole block furniture, and counting only the second copy would score it
+    # at roughly half of what it is.
+    covered: set[int] = set()
+    for start in range(len(words) - _SHINGLE_WORDS + 1):
+        if tuple(words[start:start + _SHINGLE_WORDS]) in repeats:
+            covered.update(range(start, start + _SHINGLE_WORDS))
+    return len(covered) / len(words)
+
+
+def drop_shared_boilerplate(documents: list[LoadedDocument],
+                            verbose: bool = False) -> int:
+    """Remove site furniture shared across pages. Returns blocks dropped.
+
+    Only the shared prefix is cut, never the whole block, because a content
+    block can open with a phrase the site repeats and then continue into
+    something specific. HTML only: the PDFs here are SIDs and factsheets, where
+    a repeated paragraph is a genuine regulatory notice rather than navigation,
+    and losing one would be a real loss.
+    """
+    shingles = _boilerplate_counts(
+        [d for d in documents if d.source.kind == "html"]
+    )
+    if not shingles:
+        return 0
+
+    dropped = 0
+    for document in documents:
+        if document.source.kind != "html":
+            continue
+        kept: list[str] = []
+        for block in document.blocks:
+            shingle = " ".join(_fingerprint(block).split()[:12])
+            if shingle in shingles:
+                dropped += 1
+                if verbose:
+                    print(f"    boilerplate: {block.strip()[:70]}")
+                continue
+            kept.append(block)
+        if not kept:
+            # A page that is entirely furniture is a fetch problem, not
+            # something to paper over by deleting it.
+            raise ValueError(
+                f"{document.source.url}: every block looked like site "
+                f"furniture; refusing to store an empty document"
+            )
+        document.blocks = kept
+    return dropped
+
+
 def run_load(limit: int | None = None, verbose: bool = True) -> tuple[list[LoadedDocument], list[LoadResult]]:
     """Load every source. Failures are recorded in the manifest, not raised."""
     rows = read_sources()
@@ -527,3 +699,4 @@ def write_manifest(results: list[LoadResult]) -> Path:
         for result in results:
             writer.writerow(asdict(result))
     return config.INGEST_MANIFEST_CSV
+

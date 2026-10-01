@@ -79,7 +79,20 @@ def _describe_api_error(exc: Exception) -> str:
     return f"the request failed ({type(exc).__name__})"
 
 
-def complete(system: str, user: str) -> tuple[str, str, str]:
+# Notes from the most recent `complete` call, for `ask` to fold into the
+# Answer. Module-level because `complete` sits below `ask` and the alternative
+# was threading a fourth return value through every caller.
+_UNGROUNDED_NOTES: list[str] = []
+
+
+def take_ungrounded_notes() -> tuple[str, ...]:
+    """Drain the notes from the last `complete` call."""
+    notes = tuple(_UNGROUNDED_NOTES)
+    _UNGROUNDED_NOTES.clear()
+    return notes
+
+
+def complete(system: str, user: str, context: str = "") -> tuple[str, str, str]:
     """One model call, cached. Returns (text, model_name, error).
 
     `error` is empty on success. It is returned rather than raised because a
@@ -91,6 +104,14 @@ def complete(system: str, user: str) -> tuple[str, str, str]:
     The cache sits here, at the single place a completion is produced, rather
     than at the call sites, so no path can bypass it and no path can
     double-count it.
+
+    `context` is the source block the answer is meant to come from, and it
+    gates the *write*. An answer whose figures are absent from the context is
+    still returned, because the post-check and the user are better served by a
+    visible wrong answer that a test can catch than by a silent retry - but it
+    is not banked. Temperature 0.0 does not make Groq deterministic, so
+    without this one unlucky sample in five becomes a permanent wrong answer
+    that no later run can correct. See `guardrails.ungrounded_figures`.
     """
     key = llm_cache.request_key(model=config.LLM_MODEL, system=system, user=user)
 
@@ -115,7 +136,19 @@ def complete(system: str, user: str) -> tuple[str, str, str]:
     model = getattr(response, "model", config.LLM_MODEL) or config.LLM_MODEL
     if not text:
         return "", model, "the model returned an empty response"
-    llm_cache.store(key, text, model)
+
+    ungrounded = guardrails.ungrounded_figures(text, context) if context else ()
+    if ungrounded:
+        # Reported rather than swallowed: the caller surfaces it as a problem
+        # on the Answer, so a suite fails on it instead of a human noticing
+        # later. The caller's `problems` tuple is the pipeline's only channel
+        # for "this happened and it was not fixed".
+        _UNGROUNDED_NOTES.append(
+            f"model stated {list(ungrounded)}, absent from the retrieved "
+            f"context; response not cached"
+        )
+    else:
+        llm_cache.store(key, text, model)
     return text, model, ""
 
 
@@ -369,7 +402,9 @@ def ask(question: str, show_context: bool = False, collection=None,
     raw, model, error = complete(
         system_prompt(),
         f"Source context:\n\n{context}\n\nQuestion: {search_question}",
+        context=context,
     )
+    ungrounded_notes = take_ungrounded_notes()
     if error:
         # Deliberately not a decline. A decline is a claim about the corpus -
         # "the sources do not contain this" - and this is a claim about the
@@ -406,7 +441,7 @@ def ask(question: str, show_context: bool = False, collection=None,
         scheme_filter=result.scheme_filter,
         hits=hits,
         above_floor=above,
-        problems=verified.problems,
+        problems=verified.problems + ungrounded_notes,
         repairs=verified.repairs,
         declined=declined,
         keyword_hit=result.any_keyword_hit(),

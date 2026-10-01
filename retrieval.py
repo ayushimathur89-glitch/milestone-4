@@ -336,6 +336,35 @@ def _merge(responses: list[dict]) -> list[tuple[str, str, float]]:
     return rows
 
 
+def _scheme_windows(collection, vector: list[float],
+                    schemes: tuple[str, ...], fetch: int) -> list[dict]:
+    """One query window per scheme, plus one for the global documents.
+
+    A single window spanning the scheme and `config.GLOBAL_SCHEME` is not
+    equivalent, and for the same reason the multi-scheme path above is not:
+    `fetch` is a fixed budget, and a scheme with hundreds of chunks of its own
+    takes all of it. Measured on "How do I download my capital-gains statement
+    for SBI ELSS?", the ELSS SID's 567 chunks fill the 60-candidate window
+    between them and chunk `all-schemes-2695` - which is the sentence naming
+    the Capital Gains Statement and how to get it - is never scored at all. The
+    lexical bonus that would have ranked it first is applied *after* the window
+    is cut, so a document that literally contains the question's terms can be
+    excluded for not being dense enough, which inverts the design: the pool cut
+    is a dense-similarity decision and the ranking is deliberately not.
+
+    Giving the global documents their own window costs one extra query and makes
+    every non-scheme-specific page reachable from any scheme question, which is
+    what `config.GLOBAL_SCHEME` is for. Global chunks still have to win their
+    slots on score, so this widens the candidate set and nothing else.
+    """
+    windows = [_query(collection, vector, scheme_filter(name), fetch)
+               for name in schemes]
+    windows.append(
+        _query(collection, vector, {"scheme": config.GLOBAL_SCHEME}, fetch)
+    )
+    return windows
+
+
 def retrieve(question: str, top_k: int | None = None,
              collection=None) -> SearchResult:
     """Embed the question and return the closest chunks, best match first.
@@ -374,16 +403,11 @@ def retrieve(question: str, top_k: int | None = None,
     if not schemes:
         rows = _merge([_query(collection, vector, None, fetch)])
         used_filter: tuple[str, ...] = ()
-    elif len(schemes) == 1:
-        response = _query(collection, vector, scheme_filter(schemes[0]), fetch)
-        rows = _merge([response])
-        used_filter = schemes
-        if not response["ids"][0]:
-            rows = _merge([_query(collection, vector, None, fetch)])
-            used_filter = ()
     else:
-        responses = [_query(collection, vector, scheme_filter(name), fetch)
-                     for name in schemes]
+        # One window per named scheme plus one for the global documents, so no
+        # single scheme's chunk count can starve the others. See
+        # `_scheme_windows` for the measurement that forced this.
+        responses = _scheme_windows(collection, vector, schemes, fetch)
         rows = _merge(responses)
         used_filter = schemes
         if not rows:

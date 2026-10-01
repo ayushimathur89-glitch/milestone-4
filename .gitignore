@@ -18,10 +18,14 @@ __pycache__/
 data/raw/*
 !data/raw/.gitkeep
 
-# NOTE: data/chroma/ is deliberately NOT ignored.
-# Render's free tier has an ephemeral filesystem, so the persisted vector
-# store must be committed for the app to start without re-ingesting.
+# ChromaDB vector store. Regenerate with ingest/run_ingestion.py; the binary
+# blobs are large and derived from data/raw/. Pattern is data/chroma/* (not
+# data/chroma/) so the .gitkeep can be re-included.
+# NOTE: with this ignored, a Render deploy must run ingestion at build/startup
+# time, since the free tier has an ephemeral filesystem.
 # See Docs/architecture.md section 4.
+data/chroma/*
+!data/chroma/.gitkeep
 
 # Cached model responses, keyed by the SHA-256 of the request. Ignored because
 # it is an optimisation for a rate-limited provider, not a source of truth:

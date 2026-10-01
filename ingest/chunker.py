@@ -356,8 +356,17 @@ def _read_header(raw_text: str) -> dict[str, str]:
     return header
 
 
-def chunk_document(raw_path, source_url: str, start_index: int) -> list[Chunk]:
-    """Chunk one `data/raw/*.txt` file. Chunk ids are stable and ordered."""
+def chunk_document(raw_path, source_url: str, start_index: int,
+                   blocks: list[str] | None = None) -> list[Chunk]:
+    """Chunk one `data/raw/*.txt` file. Chunk ids are stable and ordered.
+
+    `blocks` overrides the text on disk. It exists because stage 1 filters
+    site furniture out of the in-memory document list after fetching, and
+    chunking from the file would silently reinstate every dropped block - the
+    `data/raw/*.txt` copy is the record of what was *fetched*, kept verbatim as
+    a deliverable, and is not the corpus. Passing the filtered blocks keeps the
+    two honest: raw is the fetch log, the corpus is what survived filtering.
+    """
     raw_text = raw_path.read_text(encoding="utf-8")
     header = _read_header(raw_text)
     body = raw_text.split("-" * 72 + "\n", 1)[-1]
@@ -371,7 +380,10 @@ def chunk_document(raw_path, source_url: str, start_index: int) -> list[Chunk]:
     max_words = config.CHUNK_MAX_WORDS
     overlap = config.CHUNK_OVERLAP_WORDS
 
-    blocks = [b.strip() for b in body.split("\n\n") if b.strip()]
+    if blocks is None:
+        blocks = [b.strip() for b in body.split("\n\n") if b.strip()]
+    else:
+        blocks = [b.strip() for b in blocks if b.strip()]
 
     # Normalise every block to a unit that already fits the limit, so the
     # packing loop below can never assemble an over-limit chunk.
@@ -501,7 +513,10 @@ def chunk_all(documents) -> list[Chunk]:
     for document in documents:
         raw_name = Path(document.source.raw_file).name
         raw_path = config.RAW_DIR / raw_name
-        chunks.extend(chunk_document(raw_path, document.source.url, len(chunks) + 1))
+        chunks.extend(chunk_document(
+            raw_path, document.source.url, len(chunks) + 1,
+            blocks=document.blocks,
+        ))
     return chunks
 
 

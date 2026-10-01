@@ -96,12 +96,14 @@ def sanity_check(collection, chunks, vectors) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the ingestion pipeline.")
     parser.add_argument("--limit", type=int, default=None, help="only load the first N sources")
+    parser.add_argument("--verbose", action="store_true",
+                        help="print each source as it loads, and each dropped block")
     args = parser.parse_args()
 
     print("=" * 72)
     print("STAGE 1  LOAD")
     print("=" * 72)
-    documents, results = loader.run_load(limit=args.limit)
+    documents, results = loader.run_load(limit=args.limit, verbose=args.verbose)
     ok = [r for r in results if r.status == "ok"]
     failed = [r for r in results if r.status != "ok"]
     print(f"\n  loaded {len(ok)}/{len(results)}  ->  {config.RAW_DIR}")
@@ -114,6 +116,11 @@ def main() -> int:
     if not documents:
         print("\nNothing loaded; stopping before the chunk stage.")
         return 1
+
+    # After every page is in hand, because "this text is on every page" is only
+    # knowable once more than one page has been seen.
+    dropped = loader.drop_shared_boilerplate(documents, verbose=args.verbose)
+    print(f"  site furniture shared across pages, dropped: {dropped}")
 
     print()
     print("=" * 72)

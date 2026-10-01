@@ -403,6 +403,57 @@ def is_decline(text: str) -> bool:
     return bool(_DECLINE.search(body))
 
 
+# A figure is a number carrying a unit or a percentage, which is the shape an
+# invented number almost always takes: a bare integer is far too often a rank,
+# a clause number or a year to be evidence of anything.
+FIGURE_CLAIM = re.compile(
+    r"\b\d+(?:[.,]\d+)?\s*(?:%|percent|rupees?|rs\.?|lakh|crore|bps|"
+    r"years?|months?|days?)\b",
+    re.I,
+)
+
+
+def ungrounded_figures(answer: str, context: str) -> tuple[str, ...]:
+    """Figures the answer states that the supplied context does not contain.
+
+    This is the numeric half of the post-check, factored out so the cache can
+    ask the same question before it commits a response to disk.
+
+    Why it exists. `config.LLM_TEMPERATURE` is 0.0, which reads as a promise
+    that the same request always produces the same text. It is not one. Groq
+    serves temperature-0 requests from batched, nondeterministic kernels, so
+    identical inputs can and do return different completions. Measured on "What
+    is the lock-in period for SBI ELSS Tax Saver Fund?": one sample in five
+    answered "The exit load is 1% within 12 months and Nil after that", a
+    confident, contract-compliant, entirely wrong answer to a lock-in question.
+    Four others returned the correct "3 years".
+
+    The answer alone is harmless. What made it a defect is that `llm_cache`
+    stored it, and a content-addressed cache is a promise that the same key
+    always yields the same text - so one bad sample out of five was promoted
+    from a transient wobble into a permanent wrong answer that no later run
+    could correct. Keying the cache on the full request prevents a *stale* hit;
+    it cannot prevent a *wrong* one, because the key was correct and the text
+    was bad.
+
+    Checking before the write is the fix, and the post-check was the right place
+    to find it: an ungrounded figure is already a contract violation, so the
+    pipeline has the vocabulary to name it and simply was not asking the
+    question at cache time.
+    """
+    body = (answer or "").split(config.LAST_UPDATED_PREFIX)[0]
+    haystack = re.sub(r"\s+", " ", (context or "").lower())
+    missing: list[str] = []
+    for match in FIGURE_CLAIM.finditer(body):
+        figure = match.group(0).strip().lower()
+        # Compare on digits alone so "Rs. 500" matches a context that writes
+        # "Rs.500", which is the same figure in the PDFs' own typography.
+        number = re.sub(r"[^0-9.,]", "", figure)
+        if number and number not in haystack and figure not in missing:
+            missing.append(figure)
+    return tuple(missing)
+
+
 def context_urls(context: str) -> frozenset:
     """Every URL that appears in the supplied source context.
 
