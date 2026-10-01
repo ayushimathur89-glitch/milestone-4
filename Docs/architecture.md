@@ -187,7 +187,7 @@ Answer in UI
 | Language | Python 3.14 | Free, runs locally, deployable to Render. |
 | UI | Streamlit | Free tier, quick to build, runs headless on Render. |
 | Embeddings | `sentence-transformers/all-MiniLM-L6-v2` | Local, no API key, 384-dim. Same model for chunks and questions. |
-| Vector DB | ChromaDB (persistent client) | Persisted to `data/chroma/`; ingest once. |
+| Vector DB | ChromaDB (persistent client) | Git-ignored; rebuilt at build time on Render. |
 | LLM | Groq, default `qwen/qwen3.8-27b` | Free tier; key in `.env`, never committed. **The id is already confirmed against the live Groq model list** — `llama-3.1-8b-instant` was retired, and the remaining `meta-llama/*` ids are prompt-guard classifiers, not chat models. Groq retires ids without notice, so re-check `c.models.list()` if a Phase 5 call starts failing. Keep it in `config.py` so switching is a one-line change. |
 | Fetching | `requests` + `beautifulsoup4` | Public page fetch + text extraction. |
 | Config/secrets | `python-dotenv` + `.gitignore` | `.env` stays local. |
@@ -198,12 +198,18 @@ Answer in UI
 
 Render's free web service has an **ephemeral filesystem** and spins down when idle. Two decisions follow:
 
-- **Commit `data/chroma/`.** For 5 schemes the store is only a few MB. Committing it means Render never ingests at request time and "ingest once" stays literally true on Render too. Do **not** git-ignore `data/chroma/`.
-- **Startup bootstrap is a fallback, not the plan.** If the collection is genuinely missing (e.g. a clone without the store), the app ingests once and continues. Note that on Render this path also re-downloads the ~90 MB embedding model, so avoid relying on it for the demo — verify locally first, then deploy with the store committed.
+- **Git-ignore `data/chroma/`, rebuild it during the build.** Only `.gitkeep` is committed. The binary blobs are derived from `data/sources.csv`, so they are excluded the same way `data/raw/` is. This also keeps multi-hundred-MB SQLite churn out of every commit that touches the corpus.
+- **Ingestion moves to the Render build command.** Because the free tier has an ephemeral filesystem, the store cannot survive a restart and cannot be read from git, so `python -m ingest.run_ingestion` runs as the second half of the build command. "Ingest once" is true per deployment rather than per repo.
+- **Startup bootstrap stays as a fallback only.** `retrieval` still ingests when the collection is genuinely missing, but that path is not the plan.
 
-The sentence-transformers model is downloaded into the container on first run regardless (~90 MB), which lengthens the first cold start. Everything used here is free tier.
+Costs of this choice, stated so they are not discovered at deploy time:
 
-Build command `pip install -r requirements.txt`, start command `streamlit run app.py --server.port $PORT --server.address 0.0.0.0`. Set `GROQ_API_KEY` in the Render dashboard, not in the repo.
+- **The build now depends on third-party uptime.** It fetches every URL in `data/sources.csv` from sbimf.com, amfiindia.com and sebi.gov.in. `run_ingestion` exits non-zero if no documents load, or if any of the 7 demo facts is absent, so one changed official page shows up as a failed build.
+- **The build needs more memory than the free tier has.** Loading `all-MiniLM-L6-v2` through sentence-transformers costs roughly 800 MB resident once torch is imported, and embedding ~2,700 chunks on CPU follows. 512 MB / 0.5 CPU is not enough; use a paid instance.
+
+The sentence-transformers model is downloaded into the container on first run regardless (~90 MB), which lengthens the first cold start.
+
+Build command `pip install -r requirements.txt && python -m ingest.run_ingestion`, start command `streamlit run app.py --server.port $PORT --server.address 0.0.0.0`, root directory left empty because `app.py` sits at the repo root. Set `GROQ_API_KEY` in the Render dashboard, not in the repo, and pin `PYTHON_VERSION` to 3.14 since there is no `.python-version` file to read.
 
 ---
 
@@ -232,7 +238,7 @@ Milestone 4/
 │   ├── ingest_manifest.csv    # Generated: url, status, bytes, fetched_at, chunks
 │   ├── raw/                   # Cleaned source text
 │   ├── chunks.txt             # All chunks + metadata (inspectable)
-│   └── chroma/                # Persisted ChromaDB (COMMITTED, not git-ignored)
+│   └── chroma/                # Persisted ChromaDB (git-ignored; only .gitkeep committed)
 ├── samples/
 │   └── sample_qa.md           # 5-10 queries with answers + links
 ├── requirements.txt
