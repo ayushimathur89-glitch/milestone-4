@@ -137,7 +137,7 @@ SCHEME_ALIASES: dict[str, str] = {
 _SCHEME_HINTS: tuple[tuple[str, str], ...] = (
     ("SBI ELSS Tax Saver Fund", r"sbi\s+(?:elss|tax\s+saver)|elss\s+tax\s+saver"),
     ("SBI Balanced Advantage Fund", r"sbi\s+balanced|balanced\s+advantage"),
-    ("SBI Flexicap Fund", r"sbi\s+flexicap|flexicap"),
+    ("SBI Flexicap Fund", r"sbi\s+flexi[\s-]?cap|flexi[\s-]?cap"),
     ("SBI Large Cap Fund", r"sbi\s+large\s+cap"),
     ("SBI Small Cap Fund", r"sbi\s+small\s+cap"),
 )
@@ -194,7 +194,7 @@ def detect_scheme(question: str) -> str | None:
 _SCHEME_FRAGMENTS: tuple[tuple[str, str], ...] = (
     ("SBI ELSS Tax Saver Fund", r"\belss\b|\btax\s+saver\b"),
     ("SBI Balanced Advantage Fund", r"\bbalanced\s+advantage\b"),
-    ("SBI Flexicap Fund", r"\bflexicap\b"),
+    ("SBI Flexicap Fund", r"flexi[\s-]?cap"),
     ("SBI Large Cap Fund", r"\blarge\s+cap\b"),
     ("SBI Small Cap Fund", r"\bsmall\s+cap\b"),
 )

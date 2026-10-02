@@ -309,6 +309,12 @@ def check_multi_scheme() -> bool:
         ("tax saver", "tax saver", "SBI ELSS Tax Saver Fund"),
         ("flexicap", "Flexicap", "SBI Flexicap Fund"),
         ("balanced advantage", "balanced advantage", "SBI Balanced Advantage Fund"),
+        # Spacing is the user's, not ours. "Flexi Cap" was reported as reading as
+        # unrecognised because the pattern was a bare \bflexicap\b.
+        ("spaced flexicap", "Flexi Cap", "SBI Flexicap Fund"),
+        ("hyphenated flexicap", "flexi-cap", "SBI Flexicap Fund"),
+        ("unspaced flexicap", "Flexicap", "SBI Flexicap Fund"),
+        ("spaced and named", "SBI Flexi Cap Fund", "SBI Flexicap Fund"),
     ):
         expect(f"probable_scheme reads a bare \"{label}\"",
                retrieval.probable_scheme(fragment) == expected,
