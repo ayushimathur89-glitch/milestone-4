@@ -36,5 +36,9 @@ data/llm_cache/
 
 # Local tool state
 .streamlit/secrets.toml
+
+# Captured Streamlit output from running app.py in the background
+.streamlit-run.*.log
+
 .DS_Store
 Thumbs.db

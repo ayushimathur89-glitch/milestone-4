@@ -227,11 +227,48 @@ Guardrail expectations are pinned separately in
 
 ## Deploying to Render
 
-Root directory **empty** (`app.py` is at the repo root), build
-`pip install -r requirements.txt` and start
-`streamlit run app.py --server.port $PORT --server.address 0.0.0.0`.
+## Deploying to Render
 
-Set `GROQ_API_KEY` and `PYTHON_VERSION=3.14` in the dashboard.
+[`render.yaml`](render.yaml) is a Blueprint, so there is nothing to fill in by
+hand. In the Render dashboard: **New → Blueprint**, pick this repo, and Render
+reads the build and start commands, the region, the compute plan and the health
+check from that file. It prompts once for `GROQ_API_KEY`; paste the key there
+and it is stored as a Render secret. Never put the key in `render.yaml` — it
+would land in the repository's history.
+
+The service is then at `https://mf-faqs-rag.onrender.com`, in Singapore.
+
+| Setting | Value | Why |
+|---|---|---|
+| Root directory | *(empty)* | `app.py` is at the repo root |
+| Build | CPU torch, then `requirements.txt` | see below |
+| Start | `streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true` | `--server.headless` is mandatory in a container |
+| Health check | `/_stcore/health` | Streamlit's own endpoint; the default `/` runs the whole app script on every probe |
+| Plan | `free` — 0.1 CPU, 512 MB | adequate for one user at a time |
+| Python | `.python-version` → `3.14` | see below |
+
+**Why the build installs torch twice over.** PyPI's default linux `torch` wheel
+bundles the CUDA runtime — several GB across the `nvidia-*` packages, none of
+which this app can use, since retrieval is MiniLM on CPU. The build command
+therefore pulls the CPU build from PyTorch's own index first, and pip then treats
+`torch` as already satisfied when it reads `requirements.txt`. Skipping this is
+the difference between a build that finishes in a couple of minutes and one that
+times out or fills the instance's disk.
+
+**Why the version is a file, not an env var.** Render requires
+`PYTHON_VERSION` to be fully qualified — `3.14` alone is rejected, it wants
+`3.14.7`. A `.python-version` file may omit the patch and resolves to the
+newest 3.14.x, which is the safer of the two: `requirements.txt` is verified
+against 3.14.7, and a patch release is not a reason to fail a build.
+
+**The free tier is genuinely free-tier, and it is the main caveat.** The
+instance is 0.1 CPU with 512 MB, it sleeps after 15 minutes idle, and waking
+takes about a minute. Worse, the filesystem is ephemeral *per spin-down*, so the
+~90 MB embedding model is downloaded from Hugging Face again on every cold
+start, and the first question after a wake-up is slow. Cold starts are the
+normal case on a free tier, not the exception. A `0.5c-512mb` instance ($7/mo)
+wakes faster but still redownloads; a persistent disk ($0.25/GB/mo) is what
+actually fixes the model redownload, and neither is free.
 
 `data/chroma/` is deliberately committed: Render's filesystem is ephemeral, so
 the persisted vector store must ship with the repo. The build does **not** run
