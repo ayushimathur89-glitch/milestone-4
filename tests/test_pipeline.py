@@ -406,6 +406,26 @@ def check_retrieval_quality(answers) -> None:
             print(f"         {hit.preview(150)}")
 
 
+def check_prd_questions_reach_retrieval() -> bool:
+    """Every PRD question must name a topic the corpus publishes.
+
+    The clarification gate in `generator.ask` turns away any question whose
+    subject the corpus does not cover. Two PRD questions were turned away by an
+    earlier version of that topic list, because it held "expense ratio" but not
+    "statement" or "factsheet" - and the failure surfaced only as "8/10 PRD
+    questions answered", which reads like a retrieval problem and is not one.
+    """
+    _rule("8. PRD QUESTIONS NAME A SUPPORTED TOPIC")
+    ok = True
+    for question in PRD_QUESTIONS:
+        good = guardrails.names_supported_topic(question)
+        ok = ok and good
+        print(f"  {_PASS if good else _FAIL} {question[:56]}")
+    print(f"\n  {len(PRD_QUESTIONS)} PRD question(s), all named a supported topic"
+          if ok else "  at least one PRD question is turned away")
+    return ok
+
+
 def main() -> int:
     if not config.GROQ_API_KEY:
         print("GROQ_API_KEY is not set.")
@@ -448,6 +468,7 @@ def main() -> int:
         "routing (no LLM call)": check_routing(collection),
         "out-of-corpus": check_out_of_corpus(collection),
         "declined questions": check_declined_questions(answers, collection),
+        "PRD topics reachable": check_prd_questions_reach_retrieval(),
     }
     check_retrieval_quality(answers)
 

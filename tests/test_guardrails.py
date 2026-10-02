@@ -15,6 +15,7 @@ from pathlib import Path
 
 import config
 import guardrails
+import retrieval
 
 # (query, expected category). `factual` means retrieval is allowed to run.
 CASES: list[tuple[str, str]] = [
@@ -299,6 +300,112 @@ def check_ambiguity() -> bool:
     return ok
 
 
+def check_clarification() -> bool:
+    """A fragment must become a question, not a decline.
+
+    "Small Cap." and "How to Invest?" both pass `classify` as factual, then
+    reach the model with no answerable question in them and come back as "that
+    information is not in the official sources I have". Both facts are load
+    bearing: the classifier has to keep passing them (pinned in
+    `check_ambiguity`) and the topic list has to keep missing "invest".
+    """
+    print()
+    print("=" * 72)
+    print("6. FRAGMENTS ASK A QUESTION INSTEAD OF DECLINING")
+    print("=" * 72)
+    failures = []
+
+    def expect(label: str, ok: bool, detail: str = "") -> None:
+        if not ok:
+            failures.append(label)
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}{('  ' + detail) if detail else ''}")
+
+    # Answerable: these must keep reaching retrieval, so each synonym that shows
+    # up in real questions needs to be on the list.
+    supported = [
+        "What is the exit load for SBI Large Cap Fund?",
+        "What is the expense ratio of SBI Flexicap Fund?",
+        "What is the benchmark for SBI ELSS Tax Saver Fund?",
+        "How much is the minimum SIP for SBI Small Cap Fund?",
+        "What is the lock-in period for SBI ELSS Tax Saver Fund?",
+        "What is the riskometer category of SBI Balanced Advantage Fund?",
+        "What is the NAV of SBI Flexicap Fund?",
+        "What is the minimum investment for SBI Small Cap Fund?",
+        "How do I switch from the regular plan to the direct plan?",
+        "How do I redeem SBI Large Cap Fund units?",
+        # Synonyms, not the advertised words. "fees" was the one that regressed:
+        # a list holding "expense ratio" but not "fees" turned away "what about
+        # its fees?", which the app had been answering. Each of these is a word a
+        # real user reaches for and the corpus can answer.
+        "what about its fees?",
+        "What are the charges on redemption?",
+        "Is the dividend taxable?",
+        "What is the AUM of SBI Flexicap Fund?",
+        "Who is the fund manager of SBI Large Cap Fund?",
+        "Where can I find the KIM?",
+        "Is there a lock-in?",
+        "What is the exit load structure?",
+        "How much is the minimum lump sum?",
+        "Is it open ended?",
+        "Do I need a demat account?",
+        "How do I add a nominee?",
+        "Can I consolidate my folios?",
+        "What is the 80C benefit?",
+        "How do I reinvest dividends?",
+        "Where is the customer care helpline?",
+        "What is the merger ratio?",
+        "What is the portfolio turnover?",
+        "How many folios can I open?",
+    ]
+    for question in supported:
+        expect(f"supported: {question[:46]}",
+               guardrails.names_supported_topic(question))
+
+    # And the ones that must keep falling through to the clarification. These are
+    # the words a too-wide list would grab: the scheme words, the bare verbs, and
+    # "invest", which `_FUND_VOCAB` accepts and this deliberately does not.
+    unsupported = [
+        "Small Cap.",
+        "How to Invest?",
+        "Flexicap",
+        "Large cap fund",
+        "How to purchase?",
+        "tell me more",
+        "SBI",
+        "funds",
+        "what about it?",
+        "help",
+        "Explain.",
+    ]
+    for question in unsupported:
+        expect(f"clarifies:   {question[:46]}",
+               not guardrails.names_supported_topic(question))
+
+    named = guardrails.clarifying_answer("SBI Small Cap Fund")
+    expect("a fragment reply names the scheme", "SBI Small Cap Fund" in named,
+           named[:70])
+    expect("  and names the canonical form the memory can read back",
+           retrieval.detect_scheme(named) == "SBI Small Cap Fund")
+    expect("  and offers the topics it does cover",
+           all(t in named for t in ("expense ratio", "exit load", "benchmark")),
+           named[:70])
+
+    anonymous = guardrails.clarifying_answer()
+    expect("a reply with no scheme makes no claim about one",
+           "Did you mean" not in anonymous, anonymous[:70])
+    expect("  but still states what it can answer",
+           "expense ratio" in anonymous, anonymous[:70])
+    for label, message in (("named", named), ("anonymous", anonymous)):
+        expect(f"the {label} reply carries one link, like every other refusal",
+               guardrails.count_urls(message) == 1,
+               str(guardrails.count_urls(message)))
+        expect(f"the {label} reply carries no second topic list",
+               message.count(guardrails.MSG_TOPICS) == 1)
+
+    print(f"\n  {'PASS' if not failures else 'FAIL'}: {len(failures)} problem(s)")
+    return not failures
+
+
 def main() -> int:
     results = {
         "classification": check_classification(),
@@ -306,6 +413,7 @@ def main() -> int:
         "post-check": check_post_check(),
         "pii non-persistence": check_pii_not_persisted(),
         "ambiguity": check_ambiguity(),
+        "clarification": check_clarification(),
     }
     print()
     print("=" * 72)

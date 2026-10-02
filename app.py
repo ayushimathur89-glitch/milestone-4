@@ -102,14 +102,22 @@ def _sources_expander(answer: generator.Answer) -> None:
 
     The citation is the single link the contract allows. This is the evidence
     behind it, and it is collapsed by default so the transcript stays readable.
-    Sub-threshold chunks are included deliberately: a question that fell short
-    is easier to diagnose with the near-misses visible than without them.
+    Sub-threshold chunks are listed alongside the ones that were used: a question
+    answered from three good chunks is easier to diagnose when the three
+    near-misses below it are visible too.
     """
-    # No expander at all when nothing was retrieved. A question refused by the
-    # pre-check returns before retrieval by design, and an empty "Sources (0 used
-    # of 0 retrieved)" panel next to it implies the sources were consulted and
-    # came up short, which is the opposite of what happened.
-    if not answer.hits:
+    # No expander at all when nothing was used. Two ways to get here, and both
+    # make a panel misleading rather than informative:
+    #   - the pre-check refused before retrieval, so `hits` is empty;
+    #   - retrieval ran but every chunk fell below `config.MIN_SIMILARITY`, which
+    #     is what an unrelated question scores ("the boiling point of water" peaks
+    #     near 0.21 against a floor of 0.40).
+    # "Sources (0 used of 6 retrieved)" beside an answer that said it found
+    # nothing reads as six documents having been consulted for an answer nobody
+    # could give. The chunks are still on the Answer for the CLI and the tests,
+    # and the floor measurement that explains the refusal is already reported in
+    # the "Why this was not answered" panel, so nothing is lost by staying quiet.
+    if not answer.above_floor:
         return
 
     with st.expander(f"Sources ({len(answer.above_floor)} used of "

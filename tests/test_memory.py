@@ -294,6 +294,28 @@ def check_multi_scheme() -> bool:
                "minimum SIP for SBI Flexicap Fund and SBI Small Cap Fund?")
            == FLEXICAP)
 
+    # `probable_scheme` is deliberately looser than `detect_schemes`, and the
+    # looseness is the bug it would become if it were ever used as a filter:
+    # both read "Small Cap." as one scheme, but only one may decide what to
+    # search. Pinned so the distinction cannot be tidied away by accident.
+    expect("detect_schemes still needs 'sbi' to scope a fragment",
+           retrieval.detect_schemes("Small Cap.") == (),
+           str(retrieval.detect_schemes("Small Cap.")))
+    expect("probable_scheme reads that same fragment as SBI Small Cap Fund",
+           retrieval.probable_scheme("Small Cap.") == SMALLCAP)
+    for label, fragment, expected in (
+        ("large cap", "Large cap fund", "SBI Large Cap Fund"),
+        ("elss", "elss", "SBI ELSS Tax Saver Fund"),
+        ("tax saver", "tax saver", "SBI ELSS Tax Saver Fund"),
+        ("flexicap", "Flexicap", "SBI Flexicap Fund"),
+        ("balanced advantage", "balanced advantage", "SBI Balanced Advantage Fund"),
+    ):
+        expect(f"probable_scheme reads a bare \"{label}\"",
+               retrieval.probable_scheme(fragment) == expected,
+               str(retrieval.probable_scheme(fragment)))
+    expect("probable_scheme still returns None for a scheme-free fragment",
+           retrieval.probable_scheme("How to Invest?") is None)
+
     two = retrieval.scheme_filter((FLEXICAP, SMALLCAP))
     expect("the global document appears exactly once in a two-scheme filter",
            [b["scheme"] for b in two["$or"]].count(config.GLOBAL_SCHEME) == 1,

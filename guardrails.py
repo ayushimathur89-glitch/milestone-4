@@ -95,6 +95,38 @@ MSG_NO_CONTEXT = (
     f"{LINK_SBIMF}"
 )
 
+# The facts this corpus can actually answer, as a message the user gets when
+# their question names none of them. Deliberately built out of the same six
+# topics `MSG_NO_CONTEXT` and `MSG_OFF_TOPIC` already advertise, so the app
+# never offers a topic it will decline two turns later.
+MSG_TOPICS = (
+    "expense ratio, exit load, benchmark, minimum SIP, riskometer or "
+    "lock-in period"
+)
+
+
+def clarifying_answer(scheme: str | None = None) -> str:
+    """Ask what the user wants to know, instead of declining a fragment.
+
+    "Small Cap." and "How to Invest?" both reach the classifier as factual and
+    then die in the model, which has no question to ground an answer in. The
+    user is told "that information is not in the official sources I have", which
+    is true and useless: the corpus was never asked anything it could answer.
+
+    Naming the scheme the fragment points at turns a dead end into the next
+    question. The canonical name is used deliberately - `memory.referenced_scheme`
+    reads the assistant turn back out of the buffer, and a message saying
+    "SBI Small Cap Fund" is what lets "what about its exit load?" resolve to that
+    scheme on the following turn.
+    """
+    topics = (f"Ask me about {scheme}'s {MSG_TOPICS}."
+              if scheme else
+              f"Ask me about a scheme's {MSG_TOPICS}.")
+    opener = (f"Did you mean {scheme}?" if scheme else
+              "I answer from official SBI mutual fund documents, and that "
+              "question does not name a fact I can look up.")
+    return f"{opener} {topics} {config.DISCLAIMER} Factsheet index: {LINK_SBIMF}"
+
 
 # --- PII screen ---
 # Ordered most-specific first. The lookarounds matter: without them a PAN
@@ -273,6 +305,61 @@ def classify(question: str) -> Decision:
                         "not a mutual fund question")
 
     return Decision("factual", True, reason="retrievable")
+
+
+# What the corpus holds facts about. A question naming none of these cannot be
+# answered from these documents no matter how well it retrieves, because there
+# is nothing to retrieve: "How to Invest?" peaks at 0.53 similarity and returns
+# six chunks, none of which say how to buy anything. Searching 2,727 chunks for
+# "how to purchase", "purchase the units" or "how to invest" returns nothing.
+#
+# Kept wide on purpose. Every entry here is a way off the clarification path and
+# back to the behaviour that already worked, so a synonym missing from this list
+# costs a user a clarification they did not need - "what about its fees?" was
+# turned away by a list that had "expense ratio" but not "fees". The cost of
+# being too wide is milder: a question with no answerable fact reaches retrieval,
+# misses the similarity floor, and gets `MSG_NO_CONTEXT`, which is the behaviour
+# that was already there. So bias wide.
+#
+# "invest" is deliberately absent despite appearing in `_FUND_VOCAB`: it is why a
+# how-to-buy question is allowed through the classifier in the first place, and
+# matching it here would reintroduce the dead end this exists to close. Same for
+# a bare "cap" and a bare "fund", which would let "Small Cap." through.
+_SUPPORTED_TOPICS_RE = re.compile(
+    r"\b(?:"
+    # The six topics `MSG_TOPICS` advertises, plus every synonym and near
+    # synonym the corpus answers.
+    r"expense\s+ratio|\bter\b|exit\s+load|\bload\b|\bfees?\b|\bcharge[sd]?\b|"
+    r"commission|cost\s+ratio|"
+    r"benchmark|index(?:es)?|"
+    r"\bminimum\b|\bsip\b|systematic\s+investment|"
+    r"riskometer|\brisk\b|lock[\s-]?in|"
+    r"\bnav\b|net\s+asset\s+value|turnover|"
+    # What else a SID or factsheet actually publishes, asked about often enough
+    # that refusing to look it up would be the wrong answer.
+    r"\bdividend\b|reinvest\w*|switch\w*|redeem\w*|redemption|"
+    r"consolidat\w*|folios?|nominees?|demat|allotments?|"
+    r"\baum\b|fund\s+size|\bamc\b|"
+    r"open[\s-]?ended|close[\s-]?ended|\bnfo\b|merger|"
+    r"statements?|download\w*|factsheets?|capital[\s-]?gain\w*|reports?|"
+    r"\btax\w*|\b80c\b|section\s*80c|"
+    r"\bkim\b|sids?|offer[\s-]document|scheme\s+information\s+document|"
+    r"addend\w*|helpline|customer\s+care|fund\s+manager"
+    r")\b",
+    re.I,
+)
+
+
+def names_supported_topic(question: str) -> bool:
+    """Whether the question names a fact this corpus publishes.
+
+    Distinct from `classify`, which answers "is this about mutual funds at all".
+    This answers "is this about something these documents contain", which is a
+    narrower question and belongs after the classifier has passed the text,
+    never inside it: `check_ambiguity` pins "xyzzy plugh" and the monsoon
+    question as routing to retrieval, and that pinning is deliberate.
+    """
+    return bool(_SUPPORTED_TOPICS_RE.search(question or ""))
 
 
 # --- Post-check: the answer contract ---

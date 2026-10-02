@@ -184,6 +184,45 @@ def detect_scheme(question: str) -> str | None:
     return schemes[0] if schemes else None
 
 
+# The same five schemes, matched loosely enough to catch a bare fragment.
+# `detect_schemes` requires "sbi" beside the distinguishing words because "small
+# cap" also occurs in the generic phrase "a small cap fund", and filtering a
+# generic question to one scheme would hide the other four. That reasoning is
+# right for a Chroma `where` clause and wrong for telling the user which scheme
+# their fragment probably means, so the two are separate tables and only this
+# one is permissive.
+_SCHEME_FRAGMENTS: tuple[tuple[str, str], ...] = (
+    ("SBI ELSS Tax Saver Fund", r"\belss\b|\btax\s+saver\b"),
+    ("SBI Balanced Advantage Fund", r"\bbalanced\s+advantage\b"),
+    ("SBI Flexicap Fund", r"\bflexicap\b"),
+    ("SBI Large Cap Fund", r"\blarge\s+cap\b"),
+    ("SBI Small Cap Fund", r"\bsmall\s+cap\b"),
+)
+
+_FRAGMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (canonical, re.compile(pattern, re.I))
+    for canonical, pattern in sorted(
+        _SCHEME_FRAGMENTS, key=lambda item: len(item[1]), reverse=True
+    )
+)
+
+
+def probable_scheme(question: str) -> str | None:
+    """The scheme a fragment most likely means, or None.
+
+    **Never use this as a retrieval filter.** It will read "a small cap fund"
+    as SBI Small Cap Fund and, worse, as a statement about that one scheme. It
+    exists so `guardrails.clarifying_answer` can say "Did you mean SBI Small Cap
+    Fund?" and get a follow-up the app can actually answer. Use `detect_schemes`
+    to decide what to search.
+    """
+    text = question or ""
+    for canonical, pattern in _FRAGMENT_PATTERNS:
+        if pattern.search(text):
+            return canonical
+    return None
+
+
 @dataclass(frozen=True)
 class Retrieved:
     """One retrieved chunk with its score, metadata, and provenance."""

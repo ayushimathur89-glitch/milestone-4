@@ -31,6 +31,7 @@ from streamlit.testing.v1 import AppTest
 
 import config
 import generator
+from ingest import store
 
 BAR = "=" * 72
 # Absolute: `AppTest.from_file` resolves relative paths against this file, not
@@ -362,6 +363,130 @@ def check_example_buttons() -> bool:
     return not failures
 
 
+def check_unrelated_questions_hide_sources() -> bool:
+    """A question nothing in the corpus answers must show no sources at all.
+
+    Two shapes of the same mistake, and only the second one is subtle. A
+    pre-check refusal returns before retrieval, so there is nothing to show and
+    nothing to decide. The second retrieves a full page of chunks, every one of
+    them below `config.MIN_SIMILARITY`, and refuses anyway. Listing those chunks
+    under an answer that said it found nothing reads as six SBI documents having
+    been consulted for a question about the boiling point of water.
+    """
+    print()
+    print(BAR)
+    print("7. UNRELATED QUESTIONS SHOW NO SOURCES")
+    print(BAR)
+    # No stub: these paths return before the LLM is reached, and a genuine
+    # rate-limit error would prove the opposite of what is being asserted.
+    questions = {
+        "What is the boiling point of water?": "retrieves, all below the floor",
+        "Who won the FIFA World Cup in 2022?": "refused before retrieval",
+    }
+    failures = []
+
+    def expect(label: str, ok: bool, detail: str = "") -> None:
+        if not ok:
+            failures.append(label)
+        tail = f"  {detail}" if detail else ""
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}{tail}")
+
+    for question, shape in questions.items():
+        app = boot()
+        app.chat_input[0].set_value(question).run()
+        labels = [e.label for e in app.expander]
+        urls = [c for c in app.caption if c.value.startswith("http")]
+        tag = f"{question[:34]}... ({shape})"
+        expect(f"{tag} shows no sources panel",
+               not any(l.startswith("Sources") for l in labels), str(labels))
+        expect("  and no chunk URL reaches the screen", not urls,
+               str([u.value for u in urls]))
+        expect("  and the refusal still explains itself",
+               any("not answered" in l for l in labels), str(labels))
+
+    # The near-miss case is only worth testing if chunks really were retrieved.
+    # If the corpus or the floor changes and this starts scoring above it, the
+    # checks above would pass for the wrong reason and stop covering the bug
+    # they were written for. "TER" is used rather than an off-topic question
+    # because those no longer reach retrieval at all: they are turned away by the
+    # clarification gate before anything is retrieved.
+    answer = generator.ask("TER", collection=store.open_collection(store.get_client()))
+    expect("the near-miss case still retrieves chunks below the floor",
+           bool(answer.hits) and not answer.above_floor,
+           f"{len(answer.hits)} retrieved, {len(answer.above_floor)} above "
+           f"{config.MIN_SIMILARITY}")
+
+    print(f"\n  {'all unrelated-question checks passed' if not failures else f'{len(failures)} FAILED'}")
+    return not failures
+
+
+def check_fragments_ask_instead_of_declining() -> bool:
+    """"Small Cap." must ask what the user wants, and the answer must survive.
+
+    Two claims in one check because only the second proves the first is useful.
+    A clarifying reply that forgets the scheme it just named has told the user
+    to go and re-type it, which is the same dead end with an extra step. The
+    hand-off works through `memory.referenced_scheme` reading the assistant turn
+    back out of the buffer, so it needs the canonical scheme name in the message.
+    """
+    print()
+    print(BAR)
+    print("8. FRAGMENTS ASK INSTEAD OF DECLINING")
+    print(BAR)
+    failures = []
+
+    def expect(label: str, ok: bool, detail: str = "") -> None:
+        if not ok:
+            failures.append(label)
+        tail = f"  {detail}" if detail else ""
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}{tail}")
+
+    app = boot()
+    app.chat_input[0].set_value("Small Cap.").run()
+    text = visible_text(app)
+    labels = [e.label for e in app.expander]
+    expect("the fragment asks what the user wants",
+           "Did you mean SBI Small Cap Fund?" in text, text[:120])
+    expect("  and no longer claims the sources came up short",
+           "could not find an answer" not in text.lower())
+    expect("  and shows no sources panel",
+           not any(l.startswith("Sources") for l in labels), str(labels))
+    expect("  and reaches no chunk URL",
+           not [c for c in app.caption if c.value.startswith("http")])
+    expect("  and the refusal is still explained",
+           any("not answered" in l for l in labels), str(labels))
+
+    app.chat_input[0].set_value("what about its exit load?").run()
+    # Scoped to the newest answer. `visible_text` covers the whole transcript,
+    # which still holds the earlier "Did you mean ...", so asking whether the
+    # bot is still clarifying here would be answered by two turns ago.
+    answer = "\n".join(m.value for m in app.chat_message[-1].markdown)
+    expect("the follow-up is resolved to the scheme just named",
+           "SBI Small Cap Fund" in answer
+           and any("resolved" in c.value for c in app.caption),
+           str([c.value[:60] for c in app.caption if "resolved" in c.value]))
+    expect("  and it is scoped to that scheme",
+           any("Scoped to: SBI Small Cap Fund" in c.value
+               for c in app.caption))
+    expect("  and it produces a real answer, not another decline",
+           "could not find an answer" not in answer.lower()
+           and "Did you mean" not in answer, answer[:140])
+
+    app2 = boot()
+    app2.chat_input[0].set_value("How to Invest?").run()
+    text2 = visible_text(app2)
+    expect("a how-to question states what it can answer",
+           "does not name a fact I can look up" in text2, text2[:120])
+    expect("  and offers the topics rather than guessing one",
+           "expense ratio" in text2)
+    expect("  and shows no sources panel",
+           not any(e.label.startswith("Sources") for e in app2.expander),
+           str([e.label for e in app2.expander]))
+
+    print(f"\n  {'all fragment checks passed' if not failures else f'{len(failures)} FAILED'}")
+    return not failures
+
+
 def main() -> int:
     print(BAR)
     print("PHASE 6 UI (Streamlit)")
@@ -373,6 +498,8 @@ def main() -> int:
         "survives a refusal": check_refusals_keep_the_app_alive(),
         "history and clear": check_chat_state(),
         "example buttons": check_example_buttons(),
+        "unrelated questions": check_unrelated_questions_hide_sources(),
+        "fragments": check_fragments_ask_instead_of_declining(),
     }
     print()
     print(BAR)

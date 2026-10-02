@@ -364,6 +364,25 @@ def ask(question: str, show_context: bool = False, collection=None,
             elapsed=time.perf_counter() - started,
         )
 
+    # After the classifier, before retrieval. `classify` has already established
+    # that this is about mutual funds; this asks the separate question of whether
+    # these documents hold anything it could answer. Retrieval cannot answer it
+    # either way - a fragment with no question in it retrieves confidently and
+    # then declines - so asking first is what turns a dead end into a question.
+    if not guardrails.names_supported_topic(search_question):
+        scheme = retrieval.probable_scheme(search_question)
+        return finish(
+            category="underspecified",
+            answer=guardrails.clarifying_answer(scheme),
+            used_llm=False,
+            refused=True,
+            problems=(
+                "names no topic the corpus publishes"
+                + (f"; assumed {scheme} for the reply" if scheme else ""),
+            ),
+            elapsed=time.perf_counter() - started,
+        )
+
     result = retrieval.retrieve(search_question, collection=collection)
     hits = result.hits
     above = result.above_floor()
