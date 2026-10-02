@@ -40,6 +40,17 @@ def mask_secret(value: str) -> str:
 # --- Models ---
 # Runs locally, needs no API key, produces 384-dim vectors.
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# Which export of those weights to execute, and how.
+#
+# The float32 graph, run under onnxruntime rather than PyTorch. Not a
+# performance choice: torch's runtime costs ~530 MB of resident memory to
+# serve an 86 MB model, which does not fit the free-tier host's 512 MB limit,
+# and the process was being OOM-killed on the first question. The float32
+# export - not one of the O4/qint8 quantisations - reproduces the torch
+# vectors to 1.7e-07, which is why MIN_SIMILARITY and GLOBAL_ROW_BONUS below
+# still hold unchanged. Quantising would move every vector far enough to
+# require re-measuring them; see ingest/embedder.py.
+EMBEDDING_ONNX_FILE = "onnx/model.onnx"
 EMBEDDING_DIM = 384
 # The embedding model truncates beyond this many tokens. Chunking targets
 # must stay under it or chunks are silently cut before they are stored.

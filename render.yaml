@@ -23,23 +23,23 @@ services:
     plan: free
     branch: master
 
-    # Two installs, in this order, and the order matters.
+    # One install, and deliberately not two.
     #
-    # PyPI's default linux torch wheel bundles the CUDA runtime: several GB
-    # across the nvidia-* packages, none of which this app can use. Installing
-    # the CPU build first means pip treats torch as already satisfied when it
-    # reads requirements.txt, and the CUDA wheels are never pulled. This is
-    # the difference between a build that finishes in a couple of minutes and
-    # one that times out or exhausts the instance's disk.
+    # This used to pre-install a CPU-only torch wheel from the PyTorch index
+    # before requirements.txt, because PyPI's default linux torch wheel
+    # bundles several GB of CUDA runtime that this app cannot use. That was
+    # correct while the embedding model ran under sentence-transformers.
+    # It no longer is: embeddings run on the float32 ONNX export of
+    # all-MiniLM-L6-v2 under onnxruntime, so torch is not a dependency at all
+    # and the CUDA workaround went with it.
     #
-    # torch is pinned here rather than in requirements.txt because its source
-    # differs: local installs (Windows, or a CPU-only linux) take it from PyPI,
-    # Render takes it from the index below. Keep the two in step - 2.14.0 is
-    # what requirements.txt was verified against.
-    buildCommand: >-
-      pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu
-      torch==2.14.0
-      && pip install --no-cache-dir -r requirements.txt
+    # This matters for more than build time. torch's runtime needs ~530 MB to
+    # serve an 86 MB model, and this plan has 512 MB, so loading it made the
+    # process get OOM-killed the instant somebody asked a question - the page
+    # rendered perfectly and then silently stopped answering, with no
+    # traceback because the kernel ended the process rather than Python. The
+    # onnxruntime path peaks at ~254 MB. Keep requirements.txt torch-free.
+    buildCommand: pip install --no-cache-dir -r requirements.txt
 
     # --server.headless is required in a container: without it Streamlit tries
     # to open a browser and to prompt for an email on first run, which has

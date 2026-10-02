@@ -11,7 +11,7 @@ Derived from [PRD.md](./PRD.md). This document covers the components, the end-to
 | 1 | **Config** | Loads env vars (`GROQ_API_KEY`), central constants (model ids, chunk size, top-k), and the **official domain allow-list** (`sbimf.com`, `sebi.gov.in`, `amfiindia.com`). Allow-listing is enforced at the *domain* level, not by pinning exact URLs. No secrets in code. | `config.py` |
 | 2 | **Loader** | Reads the curated URL list from `data/sources.csv`, rejects any domain not on the allow-list, strips boilerplate, writes clean text to `data/raw/`, and writes a machine-generated fetch log to `data/ingest_manifest.csv`. `data/sources.csv` stays hand-edited — it is a graded deliverable and must not be rewritten by the pipeline. | `ingest/loader.py` |
 | 3 | **Chunker** | Inspects the loaded text, splits it into retrieval-sized chunks, attaches metadata, writes all chunks to an inspectable `data/chunks.txt`. | `ingest/chunker.py` |
-| 4 | **Embedder** | Wraps `sentence-transformers/all-MiniLM-L6-v2` (384-dim, runs locally, no API key). Used for **both** chunk vectors and question vectors. | `ingest/embedder.py` |
+| 4 | **Embedder** | Wraps `all-MiniLM-L6-v2` (384-dim, runs locally, no API key) on its float32 ONNX export under `onnxruntime`. Used for **both** chunk vectors and question vectors. The runtime is chosen for memory, not speed — see §4.1. | `ingest/embedder.py` |
 | 5 | **Store (ChromaDB)** | Persists embeddings + metadata to `data/chroma/`. Ingestion runs once, not on every restart. | `ingest/store.py` |
 | 6 | **Retriever** | Embeds the user question with the same model, runs similarity search, returns top-k chunks with their source metadata. Applies a scheme metadata filter when the question names a scheme. | `retrieval.py` |
 | 7 | **Guardrails** | Pre-LLM router. Classifies the query as `factual`, `advisory`, `performance`, or `pii`, and short-circuits non-factual classes to a polite facts-only message + educational link. Also a post-check that every factual answer carries exactly one citation. | `guardrails.py` |
@@ -186,7 +186,7 @@ Answer in UI
 |-------|--------|-------|
 | Language | Python 3.14 | Free, runs locally, deployable to Render. |
 | UI | Streamlit | Free tier, quick to build, runs headless on Render. |
-| Embeddings | `sentence-transformers/all-MiniLM-L6-v2` | Local, no API key, 384-dim. Same model for chunks and questions. |
+| Embeddings | `all-MiniLM-L6-v2`, float32 ONNX export under `onnxruntime` | Local, no API key, 384-dim. Same model for chunks and questions. The runtime is ONNX rather than torch because of the memory budget in §4.1; the weights are unchanged. |
 | Vector DB | ChromaDB (persistent client) | Persisted to `data/chroma/`, committed. |
 | LLM | Groq, default `qwen/qwen3.8-27b` | Free tier; key in `.env`, never committed. **The id is already confirmed against the live Groq model list** — `llama-3.1-8b-instant` was retired, and the remaining `meta-llama/*` ids are prompt-guard classifiers, not chat models. Groq retires ids without notice, so re-check `c.models.list()` if a Phase 5 call starts failing. Keep it in `config.py` so switching is a one-line change. |
 | Fetching | `requests` + `beautifulsoup4` | Public page fetch + text extraction. |
@@ -201,9 +201,25 @@ Render's free web service has an **ephemeral filesystem** and spins down when id
 - **Commit `data/chroma/`.** The free web service has an ephemeral filesystem and spins down when idle, so a store that is not in git is gone by the second wake-up. At 21 MiB for 2,727 vectors the churn is cheap; committing it means Render never ingests at request time and the cold start is seconds.
 - **There is no runtime bootstrap, and that is deliberate.** `app.py` calls `store.open_collection` directly and that raises `RuntimeError` when the collection is absent, so a missing store is a loud failure rather than a multi-minute request that looks like a hang. Rebuilding in git is the only supported path.
 
-Rebuilding the store in the build command instead was tried and reverted. It fails for two reasons: `run_ingestion` fetches every URL in `data/sources.csv` from sbimf.com, amfiindia.com and sebi.gov.in and exits non-zero if any of the 7 demo facts goes missing, so one changed official page becomes a red build; and holding `all-MiniLM-L6-v2` through sentence-transformers needs roughly 800 MB resident once torch is imported, which the free tier's 512 MB does not have. Neither is a risk worth 21 MiB.
+Rebuilding the store in the build command instead was tried and reverted. It fails for two reasons: `run_ingestion` fetches every URL in `data/sources.csv` from sbimf.com, amfiindia.com and sebi.gov.in and exits non-zero if any of the 7 demo facts goes missing, so one changed official page becomes a red build; and running ingestion and a query in one build step needs more memory than the free tier's 512 MB. Neither is a risk worth 21 MiB.
 
-The sentence-transformers model is downloaded into the container on first run regardless (~90 MB), which lengthens the first cold start. The free tier is otherwise sufficient, since the committed store removes ingestion from the critical path.
+The embedding model is downloaded into the container on the first question regardless (~86 MB), which lengthens the first cold start. The free tier is otherwise sufficient, since the committed store removes ingestion from the critical path.
+
+### 4.1 The memory budget, and why there is no torch
+
+The 512 MB limit is the real constraint on this design, and the binding number is the embedding model's resident cost, because the store opening does not load it and the first query does.
+
+| Stage | RSS |
+|---|---|
+| after the store is opened | 102 MB |
+| after the first query | 235 MB |
+| free tier limit | 512 MB |
+
+This was originally ~630 MB, because embeddings ran under `sentence-transformers` and so under PyTorch: torch's runtime needs roughly 530 MB to serve an 86 MB model. The consequence was a failure mode with no error message. Rendering the page never loads the model, so the app looked completely healthy; asking a question loaded it, exceeded the cgroup limit, and the kernel killed the process. Render restarted it and the user saw a spinner that never resolved. Because the kernel rather than Python ended the process, nothing appeared in the service logs beyond the restart — which is what made it expensive to diagnose.
+
+The fix was to keep the model and change the runtime. `ingest/embedder.py` executes `onnx/model.onnx`, the float32 ONNX export of the same `all-MiniLM-L6-v2` weights, under `onnxruntime`, and mean-pools and L2-normalises exactly as `sentence-transformers` did. `torch`, `sentence-transformers` and `transformers` are no longer dependencies, which also removes the CPU-wheel workaround from the build command (PyPI's default linux torch wheel bundles several GB of unusable CUDA runtime).
+
+The float32 export is a requirement, not a preference. It reproduces the torch vectors to `1.7e-07` (mean cosine 1.0000000 across the corpus, per-question top-1 similarity and count-above-floor identical to four decimal places), so the committed store, `MIN_SIMILARITY` and `GLOBAL_ROW_BONUS` all remain valid and the suite is unchanged. The quantised exports are smaller again — `model_qint8_avx2` is 22 MB — and are explicitly rejected, because int8 quantisation moves the vectors enough to require re-measuring every threshold in `config.py` and re-deriving the store. Should that trade ever be worth taking, it is a re-measurement project, not a one-line change.
 
 Build command `pip install -r requirements.txt`, start command `streamlit run app.py --server.port $PORT --server.address 0.0.0.0`, root directory left empty because `app.py` sits at the repo root. Set `GROQ_API_KEY` in the Render dashboard, not in the repo, and pin `PYTHON_VERSION` to 3.14 since there is no `.python-version` file to read.
 

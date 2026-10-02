@@ -7,7 +7,22 @@
 
 # --- Core RAG pipeline ---
 chromadb==1.5.9
-sentence-transformers==6.1.0
+# Embeddings run on the float32 ONNX export of all-MiniLM-L6-v2, not on
+# PyTorch. torch's runtime costs ~530 MB to serve an 86 MB model, and the
+# free-tier host has 512 MB, so the process was OOM-killed on the first
+# question. The float32 export reproduces the torch vectors to 1.7e-07, so
+# the committed vector store and every threshold in config.py carry over
+# unchanged; see ingest/embedder.py. Quantised exports (model_O4, qint8)
+# are deliberately not used - they move the vectors enough to invalidate
+# those measurements.
+#
+# These three are declared directly because ingest/embedder.py imports them
+# directly. They used to arrive transitively through sentence-transformers,
+# and onnxruntime still comes in via chromadb; relying on either would make a
+# silent dependency on another package's choice.
+onnxruntime==1.30.0
+tokenizers==0.23.2
+huggingface-hub==1.33.0
 
 # --- LLM (API key supplied via .env) ---
 groq==1.7.0

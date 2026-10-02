@@ -109,8 +109,8 @@ there is nothing to ingest first.
 .venv\Scripts\python -m streamlit run app.py
 ```
 
-Streamlit serves on <http://localhost:8501>. The first run downloads the
-embedding model (~90 MB); later runs start in a second or two.
+Streamlit serves on <http://localhost:8501>. The first question downloads the
+embedding model (~86 MB); later runs start in a second or two.
 
 The app opens with three example questions, keeps a message history, and shows
 a **Sources** panel under every answer listing the exact chunks used, each with
@@ -241,19 +241,40 @@ The service is then at `https://mf-faqs-rag.onrender.com`, in Singapore.
 | Setting | Value | Why |
 |---|---|---|
 | Root directory | *(empty)* | `app.py` is at the repo root |
-| Build | CPU torch, then `requirements.txt` | see below |
+| Build | `pip install -r requirements.txt` | one install; there is no torch |
 | Start | `streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true` | `--server.headless` is mandatory in a container |
 | Health check | `/_stcore/health` | Streamlit's own endpoint; the default `/` runs the whole app script on every probe |
-| Plan | `free` — 0.1 CPU, 512 MB | adequate for one user at a time |
+| Plan | `free` — 0.1 CPU, 512 MB | see the memory budget below |
 | Python | `.python-version` → `3.14` | see below |
 
-**Why the build installs torch twice over.** PyPI's default linux `torch` wheel
-bundles the CUDA runtime — several GB across the `nvidia-*` packages, none of
-which this app can use, since retrieval is MiniLM on CPU. The build command
-therefore pulls the CPU build from PyTorch's own index first, and pip then treats
-`torch` as already satisfied when it reads `requirements.txt`. Skipping this is
-the difference between a build that finishes in a couple of minutes and one that
-times out or fills the instance's disk.
+**The memory budget is the binding constraint, and there is no torch in this
+project.** Measured resident set for a real query:
+
+| Stage | RSS |
+|---|---|
+| after the store is opened | 102 MB |
+| **after the first query** | **235 MB** |
+| free tier limit | 512 MB |
+
+That 130 MB jump is the embedding model loading on first use. It used to be
+~530 MB instead, because embeddings ran under `sentence-transformers` and
+therefore PyTorch: torch's runtime needs half a gigabyte to serve an 86 MB
+model. On a 512 MB instance that is fatal, and it failed in a way that looked
+like nothing at all — the page rendered perfectly, because rendering never
+loads the model, and the process was OOM-killed the instant somebody asked a
+question. There is no traceback, because the kernel ends the process rather
+than Python; the service logs just show the app restarting.
+
+So the model is unchanged but its *runtime* is not. `ingest/embedder.py`
+executes the float32 ONNX export of the same `all-MiniLM-L6-v2` weights under
+`onnxruntime`, and `sentence-transformers` and `torch` are no longer
+dependencies at all. This is safe for the retrieval contract because the
+float32 export reproduces the torch vectors to `1.7e-07` — mean cosine 1.0000000
+over the corpus — so `MIN_SIMILARITY`, `GLOBAL_ROW_BONUS`, the committed vector
+store and the test suite all carry over untouched. The quantised exports
+(`model_O4`, `model_qint8_*`) are deliberately *not* used: they are smaller
+again, but they move every vector far enough to invalidate the thresholds
+measured in `config.py`. If that ever changes, re-measure them.
 
 **Why the version is a file, not an env var.** Render requires
 `PYTHON_VERSION` to be fully qualified — `3.14` alone is rejected, it wants
@@ -264,11 +285,12 @@ against 3.14.7, and a patch release is not a reason to fail a build.
 **The free tier is genuinely free-tier, and it is the main caveat.** The
 instance is 0.1 CPU with 512 MB, it sleeps after 15 minutes idle, and waking
 takes about a minute. Worse, the filesystem is ephemeral *per spin-down*, so the
-~90 MB embedding model is downloaded from Hugging Face again on every cold
+~86 MB embedding model is downloaded from Hugging Face again on every cold
 start, and the first question after a wake-up is slow. Cold starts are the
 normal case on a free tier, not the exception. A `0.5c-512mb` instance ($7/mo)
-wakes faster but still redownloads; a persistent disk ($0.25/GB/mo) is what
-actually fixes the model redownload, and neither is free.
+wakes faster but still redownloads *and still has the same 512 MB*, so it buys
+CPU and nothing else; a persistent disk ($0.25/GB/mo) is what actually fixes
+the model redownload, and neither is free.
 
 `data/chroma/` is deliberately committed: Render's filesystem is ephemeral, so
 the persisted vector store must ship with the repo. The build does **not** run
@@ -292,7 +314,10 @@ memory than the free tier has). See [`Docs/architecture.md`](Docs/architecture.m
   Unresolvable follow-ups are searched as typed, and the app says so on screen
   when it rewrites one. "Clear chat" empties both the transcript and this
   buffer. In the CLI, `/history`, `/reset` and `--no-memory` control it.
-- The embedding model is downloaded on first run (~90 MB).
+- The embedding model is downloaded on first question (~86 MB), and it needs
+  ~130 MB of memory resident while it is loaded. On a 512 MB free-tier instance
+  that is the difference between working and being OOM-killed, so see the memory
+  budget in [Deploying](#deploying) before adding any heavyweight dependency.
 - A two-scheme question is searched against both, but the answer still carries
   one citation. Read the Sources panel to see which chunks backed it.
 - Actual total TER — the all-in annual cost including fund and underlying scheme

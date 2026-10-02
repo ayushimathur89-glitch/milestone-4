@@ -90,7 +90,9 @@ The critical deliverable of this phase is `data/chunks.txt`: every chunk written
 - `data/chroma/` (generated — persisted, and **committed to git**)
 
 ### What this phase does
-`embedder.py` wraps `sentence-transformers/all-MiniLM-L6-v2`, downloading it once on first run (~90 MB, then cached locally forever — this is the "no API key" property from the brief). It is a **single shared instance** used by both this phase and `retrieval.py` in Phase 5, so chunk vectors and question vectors are guaranteed to come from the same model and occupy the same 384-dim space.
+`embedder.py` wraps `all-MiniLM-L6-v2`, downloading it once on first use (~86 MB, then cached locally forever — this is the "no API key" property from the brief). It is a **single shared instance** used by both this phase and `retrieval.py` in Phase 5, so chunk vectors and question vectors are guaranteed to come from the same model and occupy the same 384-dim space.
+
+The weights are executed through the float32 ONNX export under `onnxruntime` rather than through sentence-transformers and PyTorch. This is a deployment-driven change made after Phase 6: torch's runtime needs ~530 MB resident to serve the model, the free-tier host has 512 MB, and the process was OOM-killed on the first question with nothing but an app restart in the logs. The float32 export reproduces the torch vectors to `1.7e-07`, so every similarity in `config.py`, the committed store and this phase's outputs are unchanged — see architecture.md §4.1.
 
 `store.py` creates a ChromaDB `PersistentClient` rooted at `data/chroma/`, with one collection. Chunk text goes in the document, the 7 metadata fields go in the metadata, and the embedding is stored. Ingestion is idempotent — re-running replaces the collection rather than duplicating it.
 
