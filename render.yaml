@@ -55,11 +55,6 @@ services:
     # the embedding model on every probe.
     healthCheckPath: /_stcore/health
 
-    # The Hugging Face hub is reached from the instance at runtime, not at
-    # build time, so give a cold start room to download ~90 MB before Render
-    # decides the deploy failed.
-    maxShutdownDelaySeconds: 120
-
     autoDeployTrigger: commit
 
     envVars:
